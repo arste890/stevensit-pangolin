@@ -1,0 +1,258 @@
+import HttpCode from "@server/types/HttpCode";
+import { NextFunction, Request, Response } from "express";
+import createHttpError from "http-errors";
+import { z } from "zod";
+import { fromError } from "zod-validation-error";
+import logger from "@server/logger";
+import {
+    resourceAccessToken,
+    resourceSessions,
+    resources,
+    sessions
+} from "@server/db";
+import { db } from "@server/db";
+import { eq } from "drizzle-orm";
+import { resourceHostCondition } from "@server/db/queries/verifySessionQueries";
+import {
+    createResourceSession,
+    serializeResourceSessionCookie,
+    validateResourceSessionToken
+} from "@server/auth/sessions/resource";
+import {
+    generateSessionToken,
+    SESSION_COOKIE_EXPIRES
+} from "@server/auth/sessions/app";
+import { SESSION_COOKIE_EXPIRES as RESOURCE_SESSION_COOKIE_EXPIRES } from "@server/auth/sessions/resource";
+import config from "@server/lib/config";
+import { response } from "@server/lib/response";
+import { stripPortFromHost } from "@server/lib/ip";
+import { pickResourceForHost } from "@server/lib/traefik/rule";
+
+const exchangeSessionBodySchema = z.object({
+    requestToken: z.string(),
+    host: z.string(),
+    requestIp: z.string().optional()
+});
+
+export type ExchangeSessionBodySchema = z.infer<
+    typeof exchangeSessionBodySchema
+>;
+
+export type ExchangeSessionResponse = {
+    valid: boolean;
+    cookie?: string;
+};
+
+export async function exchangeSession(
+    req: Request,
+    res: Response,
+    next: NextFunction
+): Promise<any> {
+    logger.debug("Exchange session: Badger sent", req.body);
+
+    const parsedBody = exchangeSessionBodySchema.safeParse(req.body);
+
+    if (!parsedBody.success) {
+        return next(
+            createHttpError(
+                HttpCode.BAD_REQUEST,
+                fromError(parsedBody.error).toString()
+            )
+        );
+    }
+
+    try {
+        const { requestToken, host, requestIp } = parsedBody.data;
+        let cleanHost = host;
+        // if the host ends with :port
+        if (cleanHost.match(/:[0-9]{1,5}$/)) {
+            const matched = "" + cleanHost.match(/:[0-9]{1,5}$/);
+            cleanHost = cleanHost.slice(0, -1 * matched.length);
+        }
+
+        const clientIp = requestIp ? stripPortFromHost(requestIp) : undefined;
+
+        const potentialResources = await db
+            .select()
+            .from(resources)
+            .where(resourceHostCondition(cleanHost));
+
+        const resource = pickResourceForHost(
+            potentialResources,
+            cleanHost,
+            (r) => r.fullDomain
+        );
+
+        if (!resource) {
+            return next(
+                createHttpError(
+                    HttpCode.NOT_FOUND,
+                    `Resource with host ${cleanHost} not found`
+                )
+            );
+        }
+
+        const { resourceSession: requestSession } =
+            await validateResourceSessionToken(
+                requestToken,
+                resource.resourceId
+            );
+
+        if (!requestSession) {
+            if (config.getRawConfig().app.log_failed_attempts) {
+                logger.info(
+                    `Exchange token is invalid. Resource ID: ${resource.resourceId}. IP: ${clientIp}.`
+                );
+            }
+            return next(
+                createHttpError(HttpCode.UNAUTHORIZED, "Invalid request token")
+            );
+        }
+
+        if (!requestSession.isRequestToken) {
+            if (config.getRawConfig().app.log_failed_attempts) {
+                logger.info(
+                    `Exchange token is invalid. Resource ID: ${resource.resourceId}. IP: ${clientIp}.`
+                );
+            }
+            return next(
+                createHttpError(HttpCode.UNAUTHORIZED, "Invalid request token")
+            );
+        }
+
+        // Enforce single use: consume the request token. Checking the deleted
+        // row count makes concurrent exchanges of the same token race safely.
+        const consumed = await db
+            .delete(resourceSessions)
+            .where(eq(resourceSessions.sessionId, requestSession.sessionId))
+            .returning();
+
+        if (consumed.length === 0) {
+            return next(
+                createHttpError(HttpCode.UNAUTHORIZED, "Invalid request token")
+            );
+        }
+
+        const token = generateSessionToken();
+
+        // The request token was created by the browser's login request, so it
+        // holds the real client details. Badger's IP is the fallback.
+        const clientInfo = requestSession.ip
+            ? {
+                  ip: requestSession.ip,
+                  userAgent: requestSession.userAgent,
+                  countryCode: requestSession.countryCode,
+                  asn: requestSession.asn
+              }
+            : {
+                  ip: clientIp,
+                  userAgent: requestSession.userAgent
+              };
+
+        let expiresAt: number | null = null;
+
+        if (requestSession.userSessionId) {
+            const [res] = await db
+                .select()
+                .from(sessions)
+                .where(eq(sessions.sessionId, requestSession.userSessionId))
+                .limit(1);
+            if (res) {
+                await createResourceSession({
+                    token,
+                    resourceId: resource.resourceId,
+                    isRequestToken: false,
+                    requestSessionId: requestSession.sessionId,
+                    clientInfo,
+                    userSessionId: requestSession.userSessionId,
+                    doNotExtend: false,
+                    expiresAt: res.expiresAt,
+                    sessionLength: SESSION_COOKIE_EXPIRES
+                });
+                expiresAt = res.expiresAt;
+            }
+        } else if (requestSession.accessTokenId) {
+            const [res] = await db
+                .select()
+                .from(resourceAccessToken)
+                .where(
+                    eq(
+                        resourceAccessToken.accessTokenId,
+                        requestSession.accessTokenId
+                    )
+                )
+                .limit(1);
+            if (res) {
+                if (res.resourceId !== resource.resourceId) {
+                    return next(
+                        createHttpError(
+                            HttpCode.UNAUTHORIZED,
+                            "Invalid request token"
+                        )
+                    );
+                }
+                await createResourceSession({
+                    token,
+                    resourceId: resource.resourceId,
+                    isRequestToken: false,
+                    requestSessionId: requestSession.sessionId,
+                    clientInfo,
+                    accessTokenId: requestSession.accessTokenId,
+                    doNotExtend: true,
+                    expiresAt: res.expiresAt,
+                    sessionLength: res.sessionLength
+                });
+                expiresAt = res.expiresAt;
+            }
+        } else {
+            const expires = new Date(
+                Date.now() + SESSION_COOKIE_EXPIRES
+            ).getTime();
+            await createResourceSession({
+                token,
+                resourceId: resource.resourceId,
+                isRequestToken: false,
+                requestSessionId: requestSession.sessionId,
+                clientInfo,
+                passwordId: requestSession.passwordId,
+                pincodeId: requestSession.pincodeId,
+                userSessionId: requestSession.userSessionId,
+                whitelistId: requestSession.whitelistId,
+                accessTokenId: requestSession.accessTokenId,
+                policyPasswordId: requestSession.policyPasswordId,
+                policyPincodeId: requestSession.policyPincodeId,
+                policyWhitelistId: requestSession.policyWhitelistId,
+                doNotExtend: false,
+                expiresAt: expires,
+                sessionLength: RESOURCE_SESSION_COOKIE_EXPIRES
+            });
+            expiresAt = expires;
+        }
+
+        const cookieName = `${config.getRawConfig().server.session_cookie_name}`;
+        const cookie = serializeResourceSessionCookie(
+            cookieName,
+            cleanHost,
+            token,
+            !resource.ssl,
+            expiresAt ? new Date(expiresAt) : undefined
+        );
+
+        logger.debug(JSON.stringify("Exchange cookie: " + cookie));
+        return response<ExchangeSessionResponse>(res, {
+            data: { valid: true, cookie },
+            success: true,
+            error: false,
+            message: "Session exchanged successfully",
+            status: HttpCode.OK
+        });
+    } catch (e) {
+        console.error(e);
+        return next(
+            createHttpError(
+                HttpCode.INTERNAL_SERVER_ERROR,
+                "Failed to exchange session"
+            )
+        );
+    }
+}

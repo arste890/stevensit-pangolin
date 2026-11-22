@@ -1,0 +1,473 @@
+import {
+    clients,
+    clientSiteResourcesAssociationsCache,
+    clientSitesAssociationsCache,
+    db,
+    ExitNode,
+    networks,
+    olms,
+    remoteExitNodeResources,
+    resources,
+    Site,
+    siteNetworks,
+    siteResources,
+    targetHealthCheck,
+    targets
+} from "@server/db";
+import logger from "@server/logger";
+import { initPeerAddHandshakeBatch, updatePeersBatch } from "../olm/peers";
+import { eq, and, inArray, or, isNotNull, sql } from "drizzle-orm";
+import config from "@server/lib/config";
+import { decrypt } from "@server/lib/crypto";
+import {
+    batchFetchCertsForSiteResources,
+    formatEndpoint,
+    generateSubnetProxyTargetV2,
+    SubnetProxyTargetV2
+} from "@server/lib/ip";
+import {
+    ClientIdentity,
+    getClientIdentities
+} from "@server/lib/clientIdentities";
+
+export async function buildClientConfigurationForNewtClient(
+    site: Site,
+    exitNode?: ExitNode
+) {
+    const siteId = site.siteId;
+
+    const sendPeers = !!(site.publicKey && site.endpoint && exitNode);
+
+    // Get all clients connected to this site
+    const clientsQuery = db
+        .select()
+        .from(clients)
+        .innerJoin(
+            clientSitesAssociationsCache,
+            eq(clients.clientId, clientSitesAssociationsCache.clientId)
+        )
+        .where(eq(clientSitesAssociationsCache.siteId, siteId));
+
+    // Batch-fetch the olm for every client on this site so the peer updates
+    // can be sent as one batch instead of looking up the olm per client
+    const olmRowsQuery = sendPeers
+        ? db
+              .select({
+                  clientId: olms.clientId,
+                  olmId: olms.olmId,
+                  version: olms.version
+              })
+              .from(olms)
+              .innerJoin(
+                  clientSitesAssociationsCache,
+                  eq(olms.clientId, clientSitesAssociationsCache.clientId)
+              )
+              .where(eq(clientSitesAssociationsCache.siteId, siteId))
+        : Promise.resolve([]);
+
+    // Get all enabled site resources for this site by joining through siteNetworks and networks
+    const allSiteResourcesQuery = db
+        .select()
+        .from(siteResources)
+        .innerJoin(networks, eq(siteResources.networkId, networks.networkId))
+        .innerJoin(siteNetworks, eq(networks.networkId, siteNetworks.networkId))
+        .where(
+            and(
+                eq(siteNetworks.siteId, siteId),
+                eq(siteResources.enabled, true)
+            )
+        )
+        .then((rows) => rows.map((r) => r.siteResources));
+
+    const [clientsRes, olmRows, allSiteResources] = await Promise.all([
+        clientsQuery,
+        olmRowsQuery,
+        allSiteResourcesQuery
+    ]);
+
+    const peers: Array<{
+        publicKey: string;
+        allowedIps: string[];
+        endpoint?: string;
+    }> = [];
+
+    if (sendPeers) {
+        const olmByClientId = new Map<
+            number,
+            { olmId: string; version: string | null }
+        >();
+        for (const row of olmRows) {
+            if (row.clientId !== null && !olmByClientId.has(row.clientId)) {
+                olmByClientId.set(row.clientId, {
+                    olmId: row.olmId,
+                    version: row.version
+                });
+            }
+        }
+
+        const olmPeerUpdates: Parameters<typeof updatePeersBatch>[0] = [];
+        const olmPeerAddHandshakes: Parameters<
+            typeof initPeerAddHandshakeBatch
+        >[0] = [];
+
+        // Prepare peers data for the response
+        for (const client of clientsRes) {
+            if (!client.clients.pubKey) {
+                logger.debug(
+                    `Client ${client.clients.clientId} has no public key, skipping`
+                );
+                continue;
+            }
+            if (!client.clients.subnet) {
+                logger.debug(
+                    `Client ${client.clients.clientId} has no subnet, skipping`
+                );
+                continue;
+            }
+
+            // Add or update this peer on the olm if it is connected
+            const olm = olmByClientId.get(client.clients.clientId);
+            if (olm && !client.clientSitesAssociationsCache.isJitMode) {
+                // if we are adding sites through jit then dont add the site to the olm
+                // update the peer info on the olm
+                // if the peer has not been added yet this will be a no-op
+                olmPeerUpdates.push({
+                    clientId: client.clients.clientId,
+                    peer: {
+                        siteId: site.siteId,
+                        endpoint: site.endpoint!,
+                        relayEndpoint: formatEndpoint(
+                            exitNode!.endpoint,
+                            exitNode!.relayPort
+                        ),
+                        publicKey: site.publicKey!,
+                        serverIP: site.address,
+                        serverPort: site.listenPort
+                    },
+                    olmId: olm.olmId,
+                    version: olm.version
+                });
+
+                // also trigger the peer add handshake in case the peer was not already added to the olm and we need to hole punch
+                // if it has already been added this will be a no-op
+                olmPeerAddHandshakes.push({
+                    clientId: client.clients.clientId,
+                    peer: {
+                        siteId,
+                        exitNode: {
+                            publicKey: exitNode!.publicKey,
+                            relayPort: exitNode!.relayPort,
+                            endpoint: exitNode!.endpoint
+                        }
+                    },
+                    olmId: olm.olmId
+                });
+            }
+
+            peers.push({
+                publicKey: client.clients.pubKey,
+                allowedIps: [`${client.clients.subnet.split("/")[0]}/32`], // we want to only allow from that client
+                endpoint: client.clientSitesAssociationsCache.isRelayed
+                    ? ""
+                    : client.clientSitesAssociationsCache.endpoint! // if its relayed it should be localhost
+            });
+        }
+
+        // send the updates before the handshakes, matching the per-client order
+        await updatePeersBatch(olmPeerUpdates);
+        await initPeerAddHandshakeBatch(olmPeerAddHandshakes);
+    }
+
+    const targetsToSend: SubnetProxyTargetV2[] = [];
+
+    if (allSiteResources.length === 0) {
+        return {
+            peers,
+            targets: targetsToSend,
+            clientIdentities: [] as ClientIdentity[]
+        };
+    }
+
+    // Batch fetch all client associations for every site resource in one query
+    // to avoid an N+1 lookup that would issue thousands of queries when a site
+    // has many resources.
+    const siteResourceIds = allSiteResources.map((r) => r.siteResourceId);
+
+    const resourceClientRows = await db
+        .select({
+            siteResourceId: clientSiteResourcesAssociationsCache.siteResourceId,
+            clientId: clients.clientId,
+            pubKey: clients.pubKey,
+            subnet: clients.subnet
+        })
+        .from(clients)
+        .innerJoin(
+            clientSiteResourcesAssociationsCache,
+            eq(clients.clientId, clientSiteResourcesAssociationsCache.clientId)
+        )
+        .where(
+            inArray(
+                clientSiteResourcesAssociationsCache.siteResourceId,
+                siteResourceIds
+            )
+        );
+
+    const clientsByResourceId = new Map<
+        number,
+        { clientId: number; pubKey: string | null; subnet: string | null }[]
+    >();
+    for (const row of resourceClientRows) {
+        let list = clientsByResourceId.get(row.siteResourceId);
+        if (!list) {
+            list = [];
+            clientsByResourceId.set(row.siteResourceId, list);
+        }
+        list.push({
+            clientId: row.clientId,
+            pubKey: row.pubKey,
+            subnet: row.subnet
+        });
+    }
+
+    // Batch-fetch certs for every SSL-enabled HTTP resource's domain in one
+    // call rather than letting each resource fetch its own — with thousands
+    // of resources this avoids a concurrent DB/cache stampede for what is
+    // often the very same (e.g. wildcard) certificate.
+    const certByDomain =
+        await batchFetchCertsForSiteResources(allSiteResources);
+
+    const resourceTargetsArr = await Promise.all(
+        allSiteResources.map((resource) =>
+            generateSubnetProxyTargetV2(
+                resource,
+                clientsByResourceId.get(resource.siteResourceId) ?? [],
+                certByDomain
+            )
+        )
+    );
+
+    for (const resourceTargets of resourceTargetsArr) {
+        if (resourceTargets) {
+            targetsToSend.push(...resourceTargets);
+        }
+    }
+
+    // Only clients that can reach an HTTP resource ever hit newt's HTTP proxy,
+    // so those are the only identities it needs to set Remote-* headers.
+    const httpClientIds = new Set<number>();
+    for (const resource of allSiteResources) {
+        if (resource.mode !== "http") {
+            continue;
+        }
+        for (const c of clientsByResourceId.get(resource.siteResourceId) ??
+            []) {
+            httpClientIds.add(c.clientId);
+        }
+    }
+    const clientIdentities = Array.from(
+        (await getClientIdentities(httpClientIds)).values()
+    );
+
+    return {
+        peers,
+        targets: targetsToSend,
+        clientIdentities
+    };
+}
+
+export async function buildTargetConfigurationForNewtClient(
+    siteId: number,
+    version?: string | null,
+    remoteExitNodeId?: string
+) {
+    // Get enabled HTTP/TCP/UDP targets for resources and AI providers
+    const allTargetsQuery = db
+        .select({
+            resourceId: targets.resourceId,
+            targetId: targets.targetId,
+            ip: targets.ip,
+            method: targets.method,
+            port: targets.port,
+            internalPort: targets.internalPort,
+            enabled: targets.enabled,
+            mode: sql<string>`COALESCE(${resources.mode}, ${targets.mode})`.mapWith(
+                String
+            )
+        })
+        .from(targets)
+        .leftJoin(resources, eq(targets.resourceId, resources.resourceId))
+        .where(
+            and(
+                eq(targets.siteId, siteId),
+                eq(targets.enabled, true),
+                inArray(targets.mode, ["http", "udp", "tcp"]),
+                or(isNotNull(targets.resourceId), isNotNull(targets.providerId))
+            )
+        );
+
+    const allHealthChecksQuery = db
+        .select({
+            targetHealthCheckId: targetHealthCheck.targetHealthCheckId,
+            hcEnabled: targetHealthCheck.hcEnabled,
+            hcPath: targetHealthCheck.hcPath,
+            hcScheme: targetHealthCheck.hcScheme,
+            hcMode: targetHealthCheck.hcMode,
+            hcHostname: targetHealthCheck.hcHostname,
+            hcPort: targetHealthCheck.hcPort,
+            hcInterval: targetHealthCheck.hcInterval,
+            hcUnhealthyInterval: targetHealthCheck.hcUnhealthyInterval,
+            hcTimeout: targetHealthCheck.hcTimeout,
+            hcHeaders: targetHealthCheck.hcHeaders,
+            hcFollowRedirects: targetHealthCheck.hcFollowRedirects,
+            hcMethod: targetHealthCheck.hcMethod,
+            hcTlsServerName: targetHealthCheck.hcTlsServerName,
+            hcStatus: targetHealthCheck.hcStatus,
+            hcHealthyThreshold: targetHealthCheck.hcHealthyThreshold,
+            hcUnhealthyThreshold: targetHealthCheck.hcUnhealthyThreshold
+        })
+        .from(targetHealthCheck)
+        .where(eq(targetHealthCheck.siteId, siteId));
+
+    // Get all enabled targets with their resource mode information
+    const allBrowserGatewayTargetsQuery = db
+        .select({
+            resourceId: targets.resourceId,
+            targetId: targets.targetId,
+            ip: targets.ip,
+            method: targets.method,
+            port: targets.port,
+            enabled: targets.enabled,
+            mode: resources.mode,
+            authToken: targets.authToken
+        })
+        .from(targets)
+        .innerJoin(resources, eq(targets.resourceId, resources.resourceId))
+        .where(
+            and(
+                eq(targets.siteId, siteId),
+                eq(targets.enabled, true),
+                inArray(targets.mode, ["ssh", "rdp", "vnc"])
+            )
+        );
+
+    const remoteNodeResourcesQuery = remoteExitNodeId
+        ? db
+              .select()
+              .from(remoteExitNodeResources)
+              .where(
+                  eq(remoteExitNodeResources.remoteExitNodeId, remoteExitNodeId)
+              )
+        : Promise.resolve([]);
+
+    const [
+        allTargets,
+        allHealthChecks,
+        allBrowserGatewayTargets,
+        remoteNodeResources
+    ] = await Promise.all([
+        allTargetsQuery,
+        allHealthChecksQuery,
+        allBrowserGatewayTargetsQuery,
+        remoteNodeResourcesQuery
+    ]);
+
+    const { tcpTargets, udpTargets } = allTargets.reduce(
+        (acc, target) => {
+            // Filter out invalid targets
+            if (!target.internalPort || !target.ip || !target.port) {
+                return acc;
+            }
+
+            // Format target into string (handles IPv6 bracketing)
+            const formattedTarget = `${target.internalPort}:${formatEndpoint(target.ip, target.port)}`;
+
+            // Add to the appropriate protocol array
+            if (target.mode === "udp") {
+                acc.udpTargets.push(formattedTarget);
+            } else {
+                // all other modes are tcp
+                acc.tcpTargets.push(formattedTarget);
+            }
+
+            return acc;
+        },
+        { tcpTargets: [] as string[], udpTargets: [] as string[] }
+    );
+
+    const healthCheckTargets = allHealthChecks.map((target) => {
+        // make sure the stuff is defined
+        const isTCP = target.hcMode?.toLowerCase() === "tcp";
+        if (!target.hcHostname || !target.hcPort || !target.hcInterval) {
+            return null;
+        }
+        if (!isTCP && (!target.hcPath || !target.hcMethod)) {
+            return null;
+        }
+
+        // parse headers
+        const hcHeadersParse = target.hcHeaders
+            ? JSON.parse(target.hcHeaders)
+            : null;
+        const hcHeadersSend: { [key: string]: string } = {};
+        if (hcHeadersParse) {
+            hcHeadersParse.forEach(
+                (header: { name: string; value: string }) => {
+                    hcHeadersSend[header.name] = header.value;
+                }
+            );
+        }
+
+        return {
+            id: target.targetHealthCheckId,
+            hcEnabled: target.hcEnabled,
+            hcPath: target.hcPath,
+            hcScheme: target.hcScheme,
+            hcMode: target.hcMode,
+            hcHostname: target.hcHostname,
+            hcPort: target.hcPort,
+            hcInterval: target.hcInterval, // in seconds
+            hcUnhealthyInterval: target.hcUnhealthyInterval, // in seconds
+            hcTimeout: target.hcTimeout, // in seconds
+            hcHeaders: hcHeadersSend,
+            hcFollowRedirects: target.hcFollowRedirects,
+            hcMethod: target.hcMethod,
+            hcTlsServerName: target.hcTlsServerName,
+            hcStatus: target.hcStatus,
+            hcHealthyThreshold: target.hcHealthyThreshold,
+            hcUnhealthyThreshold: target.hcUnhealthyThreshold
+        };
+    });
+
+    // Filter out any null values from health check targets
+    const validHealthCheckTargets = healthCheckTargets.filter(
+        (target) => target !== null
+    );
+
+    const serverSecret = config.getRawConfig().server.secret!;
+    const browserGatewayTargets = allBrowserGatewayTargets.map((t) => {
+        if (!t.ip || !t.port || !t.authToken) {
+            return null;
+        }
+        const decryptAuthToken = decrypt(t.authToken, serverSecret);
+        return {
+            id: t.targetId,
+            type: t.mode,
+            destination: t.ip,
+            destinationPort: t.port,
+            authToken: decryptAuthToken
+        };
+    });
+
+    // filter through these and provide the subnets
+    const remoteExitNodeSubnets: string[] = remoteNodeResources.map(
+        (r) => r.destination
+    );
+
+    return {
+        validHealthCheckTargets,
+        tcpTargets,
+        udpTargets,
+        browserGatewayTargets,
+        remoteExitNodeSubnets
+    };
+}

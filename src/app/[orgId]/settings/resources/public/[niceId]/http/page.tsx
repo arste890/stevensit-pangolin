@@ -1,0 +1,498 @@
+"use client";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+    DescribedSelect,
+    type DescribedSelectOption
+} from "@app/components/DescribedSelect";
+import { HeadersInput } from "@app/components/HeadersInput";
+import {
+    SettingsContainer,
+    SettingsFormCell,
+    SettingsFormGrid,
+    SettingsSection,
+    SettingsSectionBody,
+    SettingsSectionDescription,
+    SettingsSectionFooter,
+    SettingsSectionForm,
+    SettingsSectionHeader,
+    SettingsSectionTitle
+} from "@app/components/Settings";
+import { SwitchInput } from "@app/components/SwitchInput";
+import {
+    Form,
+    FormControl,
+    FormDescription,
+    FormField,
+    FormItem,
+    FormLabel,
+    FormMessage
+} from "@app/components/ui/form";
+import type { ResourceContextType } from "@app/contexts/resourceContext";
+import { useEnvContext } from "@app/hooks/useEnvContext";
+import { useResourceContext } from "@app/hooks/useResourceContext";
+import { toast } from "@app/hooks/useToast";
+import { createApiClient, formatAxiosError } from "@app/lib/api";
+import { resourceQueries } from "@app/lib/queries";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { UpdateResourceResponse } from "@server/routers/resource";
+import { tlsNameSchema } from "@server/lib/schemas";
+import { useQuery } from "@tanstack/react-query";
+import {
+    ProxyResourceTargetsForm
+} from "@app/app/[orgId]/settings/resources/public/ProxyResourceTargetsForm";
+import { AxiosResponse } from "axios";
+import { useTranslations } from "next-intl";
+import { useParams, useRouter } from "next/navigation";
+import { useActionState, useState, startTransition } from "react";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
+
+const LOAD_BALANCING_STRATEGIES = ["wrr", "p2c", "hrw", "leasttime"] as const;
+type LoadBalancingStrategy = (typeof LOAD_BALANCING_STRATEGIES)[number];
+
+export default function ReverseProxyTargetsPage() {
+    const params = useParams();
+    const { resource, updateResource } = useResourceContext();
+
+    const { data: remoteTargets = [], isLoading: isLoadingTargets } = useQuery(
+        resourceQueries.resourceTargets({
+            resourceId: resource.resourceId
+        })
+    );
+
+    if (isLoadingTargets) {
+        return null;
+    }
+
+    return (
+        <SettingsContainer>
+            <ProxyResourceTargetsForm
+                orgId={params.orgId as string}
+                isHttp={["http", "ssh", "rdp", "vnc"].includes(resource.mode)}
+                initialTargets={remoteTargets}
+                resource={resource}
+                updateResource={updateResource}
+            />
+
+            {["http", "ssh", "rdp", "vnc"].includes(resource.mode) && (
+                <ProxyResourceHttpForm
+                    resource={resource}
+                    updateResource={updateResource}
+                />
+            )}
+        </SettingsContainer>
+    );
+}
+
+function ProxyResourceHttpForm({
+    resource,
+    updateResource
+}: Pick<ResourceContextType, "resource" | "updateResource">) {
+    const t = useTranslations();
+    const router = useRouter();
+    const { env } = useEnvContext();
+    const api = createApiClient({ env });
+
+    const httpSettingsSchema = z.object({
+        stickySession: z.boolean(),
+        loadBalancingStrategy: z.enum(LOAD_BALANCING_STRATEGIES),
+        ssl: z.boolean(),
+        tlsServerName: z
+            .string()
+            .optional()
+            .refine(
+                (data) => {
+                    if (data) {
+                        return tlsNameSchema.safeParse(data).success;
+                    }
+                    return true;
+                },
+                {
+                    message: t("proxyErrorTls")
+                }
+            ),
+        setHostHeader: z
+            .string()
+            .optional()
+            .refine(
+                (data) => {
+                    if (data) {
+                        return tlsNameSchema.safeParse(data).success;
+                    }
+                    return true;
+                },
+                {
+                    message: t("proxyErrorInvalidHeader")
+                }
+            ),
+        forwardIdentityHeaders: z.boolean(),
+        requestHeaders: z
+            .array(z.object({ name: z.string(), value: z.string() }))
+            .nullable(),
+        responseHeaders: z
+            .array(z.object({ name: z.string(), value: z.string() }))
+            .nullable()
+    });
+
+    const form = useForm({
+        resolver: zodResolver(httpSettingsSchema),
+        defaultValues: {
+            stickySession: resource.stickySession,
+            loadBalancingStrategy: resource.loadBalancingStrategy,
+            ssl: resource.ssl,
+            tlsServerName: resource.tlsServerName || "",
+            setHostHeader: resource.setHostHeader || "",
+            forwardIdentityHeaders: resource.forwardIdentityHeaders,
+            requestHeaders: resource.requestHeaders,
+            responseHeaders: resource.responseHeaders
+        },
+        mode: "onChange"
+    });
+
+    const loadBalancingOptions: DescribedSelectOption<LoadBalancingStrategy>[] =
+        LOAD_BALANCING_STRATEGIES.map((strategy) => ({
+            value: strategy,
+            title: t(`loadBalancingStrategy_${strategy}`),
+            description: t(`loadBalancingStrategy_${strategy}_description`)
+        }));
+
+    const [, formAction, saveLoading] = useActionState(onSubmit, null);
+    const [requestHeadersValid, setRequestHeadersValid] = useState(true);
+    const [responseHeadersValid, setResponseHeadersValid] = useState(true);
+
+    async function onSubmit() {
+        const isValid = await form.trigger();
+        if (!isValid) return;
+
+        if (!requestHeadersValid || !responseHeadersValid) {
+            toast({
+                variant: "destructive",
+                title: t("settingsErrorUpdate"),
+                description: t("headersValidationError")
+            });
+            return;
+        }
+
+        const data = form.getValues();
+
+        const res = await api
+            .post<AxiosResponse<UpdateResourceResponse>>(
+                `/resource/${resource.resourceId}`,
+                {
+                    stickySession: data.stickySession,
+                    loadBalancingStrategy: data.loadBalancingStrategy,
+                    ssl: data.ssl,
+                    tlsServerName: data.tlsServerName || null,
+                    setHostHeader: data.setHostHeader || null,
+                    forwardIdentityHeaders: data.forwardIdentityHeaders,
+                    requestHeaders: data.requestHeaders || null,
+                    responseHeaders: data.responseHeaders || null
+                }
+            )
+            .catch((err) => {
+                toast({
+                    variant: "destructive",
+                    title: t("settingsErrorUpdate"),
+                    description: formatAxiosError(
+                        err,
+                        t("settingsErrorUpdateDescription")
+                    )
+                });
+            });
+
+        if (res && res.status === 200) {
+            updateResource({
+                ...resource,
+                stickySession: data.stickySession,
+                loadBalancingStrategy: data.loadBalancingStrategy,
+                ssl: data.ssl,
+                tlsServerName: data.tlsServerName || null,
+                setHostHeader: data.setHostHeader || null,
+                forwardIdentityHeaders: data.forwardIdentityHeaders,
+                requestHeaders: data.requestHeaders || null,
+                responseHeaders: data.responseHeaders || null
+            });
+
+            toast({
+                title: t("settingsUpdated"),
+                description: t("settingsUpdatedDescription")
+            });
+
+            router.refresh();
+        }
+    }
+
+    return (
+        <SettingsSection>
+            <SettingsSectionHeader>
+                <SettingsSectionTitle>
+                    {t("proxyAdditional")}
+                </SettingsSectionTitle>
+                <SettingsSectionDescription>
+                    {t("proxyAdditionalDescription")}
+                </SettingsSectionDescription>
+            </SettingsSectionHeader>
+
+            <SettingsSectionBody>
+                <SettingsSectionForm variant="half">
+                    <Form {...form}>
+                        <form
+                            onSubmit={(e) => {
+                                e.preventDefault();
+                                startTransition(() => {
+                                    formAction();
+                                });
+                            }}
+                            id="http-settings-form"
+                        >
+                            <SettingsFormGrid>
+                                {!env.flags.usePangolinDns && (
+                                    <SettingsFormCell span="full">
+                                        <FormField
+                                            control={form.control}
+                                            name="ssl"
+                                            render={({ field }) => (
+                                                <FormItem>
+                                                    <FormControl>
+                                                        <SwitchInput
+                                                            id="ssl-toggle"
+                                                            label={t(
+                                                                "proxyEnableSSL"
+                                                            )}
+                                                            description={t(
+                                                                "proxyEnableSSLDescription"
+                                                            )}
+                                                            checked={
+                                                                field.value
+                                                            }
+                                                            onCheckedChange={
+                                                                field.onChange
+                                                            }
+                                                        />
+                                                    </FormControl>
+                                                </FormItem>
+                                            )}
+                                        />
+                                    </SettingsFormCell>
+                                )}
+
+                                <SettingsFormCell span="half">
+                                    <FormField
+                                        control={form.control}
+                                        name="setHostHeader"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>
+                                                    {t("proxyCustomHeader")}
+                                                </FormLabel>
+                                                <FormControl>
+                                                    <Input {...field} />
+                                                </FormControl>
+                                                <FormDescription>
+                                                    {t(
+                                                        "proxyCustomHeaderDescription"
+                                                    )}
+                                                </FormDescription>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                </SettingsFormCell>
+
+                                <SettingsFormCell span="half">
+                                    <FormField
+                                        control={form.control}
+                                        name="tlsServerName"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>
+                                                    {t("targetTlsSni")}
+                                                </FormLabel>
+                                                <FormControl>
+                                                    <Input {...field} />
+                                                </FormControl>
+                                                <FormDescription>
+                                                    {t(
+                                                        "targetTlsSniDescription"
+                                                    )}
+                                                </FormDescription>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                </SettingsFormCell>
+
+                                <SettingsFormCell span="half">
+                                    <FormField
+                                        control={form.control}
+                                        name="stickySession"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormControl>
+                                                    <SwitchInput
+                                                        id="sticky-toggle"
+                                                        label={t(
+                                                            "targetStickySessions"
+                                                        )}
+                                                        description={t(
+                                                            "targetStickySessionsDescription"
+                                                        )}
+                                                        checked={field.value}
+                                                        onCheckedChange={
+                                                            field.onChange
+                                                        }
+                                                    />
+                                                </FormControl>
+                                            </FormItem>
+                                        )}
+                                    />
+                                </SettingsFormCell>
+
+                                <SettingsFormCell span="half">
+                                    <FormField
+                                        control={form.control}
+                                        name="loadBalancingStrategy"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>
+                                                    {t(
+                                                        "loadBalancingStrategy"
+                                                    )}
+                                                </FormLabel>
+                                                <FormControl>
+                                                    <DescribedSelect<LoadBalancingStrategy>
+                                                        options={
+                                                            loadBalancingOptions
+                                                        }
+                                                        value={field.value}
+                                                        onChange={
+                                                            field.onChange
+                                                        }
+                                                        searchPlaceholder={t(
+                                                            "loadBalancingStrategySearch"
+                                                        )}
+                                                        emptyMessage={t(
+                                                            "loadBalancingStrategyNotFound"
+                                                        )}
+                                                    />
+                                                </FormControl>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                </SettingsFormCell>
+
+                                <SettingsFormCell span="full">
+                                    <FormField
+                                        control={form.control}
+                                        name="forwardIdentityHeaders"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormControl>
+                                                    <SwitchInput
+                                                        id="forward-identity-headers-toggle"
+                                                        label={t(
+                                                            "proxyForwardIdentityHeaders"
+                                                        )}
+                                                        description={t(
+                                                            "proxyForwardIdentityHeadersDescription"
+                                                        )}
+                                                        checked={field.value}
+                                                        onCheckedChange={
+                                                            field.onChange
+                                                        }
+                                                    />
+                                                </FormControl>
+                                            </FormItem>
+                                        )}
+                                    />
+                                </SettingsFormCell>
+
+                                <SettingsFormCell span="full">
+                                    <FormField
+                                        control={form.control}
+                                        name="requestHeaders"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>
+                                                    {t("customRequestHeaders")}
+                                                </FormLabel>
+                                                <FormControl>
+                                                    <HeadersInput
+                                                        value={field.value}
+                                                        onChange={
+                                                            field.onChange
+                                                        }
+                                                        onValidityChange={
+                                                            setRequestHeadersValid
+                                                        }
+                                                        rows={4}
+                                                    />
+                                                </FormControl>
+                                                <FormDescription>
+                                                    {t(
+                                                        "customRequestHeadersDescription"
+                                                    )}
+                                                </FormDescription>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                </SettingsFormCell>
+
+                                <SettingsFormCell span="full">
+                                    <FormField
+                                        control={form.control}
+                                        name="responseHeaders"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>
+                                                    {t("customResponseHeaders")}
+                                                </FormLabel>
+                                                <FormControl>
+                                                    <HeadersInput
+                                                        value={field.value}
+                                                        onChange={
+                                                            field.onChange
+                                                        }
+                                                        onValidityChange={
+                                                            setResponseHeadersValid
+                                                        }
+                                                        rows={4}
+                                                    />
+                                                </FormControl>
+                                                <FormDescription>
+                                                    {t(
+                                                        "customResponseHeadersDescription"
+                                                    )}
+                                                </FormDescription>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                </SettingsFormCell>
+                            </SettingsFormGrid>
+                        </form>
+                    </Form>
+                </SettingsSectionForm>
+            </SettingsSectionBody>
+
+            <SettingsSectionFooter>
+                <Button
+                    type="submit"
+                    loading={saveLoading}
+                    disabled={
+                        saveLoading ||
+                        !requestHeadersValid ||
+                        !responseHeadersValid
+                    }
+                    form="http-settings-form"
+                >
+                    {t("saveSettings")}
+                </Button>
+            </SettingsSectionFooter>
+        </SettingsSection>
+    );
+}

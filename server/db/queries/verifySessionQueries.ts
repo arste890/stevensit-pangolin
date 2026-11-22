@@ -1,0 +1,595 @@
+import {
+    db,
+    loginPage,
+    LoginPage,
+    loginPageOrg,
+    Org,
+    orgs,
+    roles
+} from "@server/db";
+import {
+    Resource,
+    ResourcePassword,
+    ResourcePincode,
+    ResourceRule,
+    resourcePassword,
+    resourcePincode,
+    resourceHeaderAuth,
+    ResourceHeaderAuth,
+    resourceRules,
+    resourcePolicyRules,
+    resources,
+    roleResources,
+    rolePolicies,
+    sessions,
+    userResources,
+    userPolicies,
+    users,
+    ResourceHeaderAuthExtendedCompatibility,
+    resourceHeaderAuthExtendedCompatibility,
+    resourcePolicies,
+    resourcePolicyPincode,
+    ResourcePolicyPincode,
+    resourcePolicyPassword,
+    ResourcePolicyPassword,
+    resourcePolicyHeaderAuth,
+    ResourcePolicyHeaderAuth,
+    resourceWhitelist,
+    resourcePolicyWhiteList,
+    redirects,
+    domains
+} from "@server/db";
+import { alias } from "@server/db";
+import { and, desc, eq, inArray, isNull, not, or, sql } from "drizzle-orm";
+import logger from "@server/logger";
+import { pickResourceForHost } from "@server/lib/traefik/rule";
+
+export type ResourceWithAuth = {
+    resource: Resource | null;
+    pincode: ResourcePincode | ResourcePolicyPincode | null;
+    password: ResourcePassword | ResourcePolicyPassword | null;
+    headerAuth: ResourceHeaderAuth | ResourcePolicyHeaderAuth | null;
+    headerAuthExtendedCompatibility: ResourceHeaderAuthExtendedCompatibility | null;
+    applyRules: boolean | null;
+    sso: boolean | null;
+    emailWhitelistEnabled: boolean | null;
+    org: Org;
+};
+
+export type RedirectByHost = {
+    redirectId: number;
+    orgId: string;
+    matchPath: string | null;
+    pathMatchType: string;
+    destinationHost: string;
+    rewritePath: string | null;
+    rewritePathType: string | null;
+    permanent: boolean;
+    priority: number | null;
+};
+
+export type UserSessionWithUser = {
+    session: any;
+    user: any;
+};
+
+/**
+ * Enabled redirects listening on the given host, highest priority first.
+ * A redirect listens on its resource's fullDomain when attached to one,
+ * otherwise on subdomain.baseDomain (or the bare baseDomain) of its domain.
+ * Mirrors the host resolution in getTraefikConfig so badger agrees with
+ * what Traefik routed.
+ */
+export async function getRedirectsByHost(
+    host: string
+): Promise<RedirectByHost[]> {
+    // A literal "*." leading label matches any single subdomain, like
+    // wildcard resources do.
+    const parts = host.split(".");
+    const candidates = [host];
+    for (let i = 1; i < parts.length; i++) {
+        candidates.push(`*.${parts.slice(i).join(".")}`);
+    }
+
+    const redirectHost = sql<string>`case
+        when ${redirects.resourceId} is not null then ${resources.fullDomain}
+        when ${redirects.subdomain} is null then ${domains.baseDomain}
+        else ${redirects.subdomain} || '.' || ${domains.baseDomain}
+    end`;
+
+    return db
+        .select({
+            redirectId: redirects.redirectId,
+            orgId: redirects.orgId,
+            matchPath: redirects.matchPath,
+            pathMatchType: redirects.pathMatchType,
+            destinationHost: redirects.destinationHost,
+            rewritePath: redirects.rewritePath,
+            rewritePathType: redirects.rewritePathType,
+            permanent: redirects.permanent,
+            priority: redirects.priority
+        })
+        .from(redirects)
+        .leftJoin(resources, eq(resources.resourceId, redirects.resourceId))
+        .leftJoin(domains, eq(domains.domainId, redirects.domainId))
+        .where(
+            and(
+                eq(redirects.enabled, true),
+                // Traefik drops resource-attached redirects along with a
+                // disabled resource; do the same here.
+                or(
+                    isNull(redirects.resourceId),
+                    and(
+                        eq(resources.enabled, true),
+                        not(isNull(resources.domainId))
+                    )
+                ),
+                or(
+                    inArray(redirectHost, candidates),
+                    // A redirect on a resource follows it onto its base host
+                    and(
+                        eq(resources.matchBaseDomain, true),
+                        eq(redirectHost, `*.${host}`)
+                    )
+                )
+            )
+        )
+        .orderBy(desc(redirects.priority));
+}
+
+/**
+ * Condition for the resources that may serve a host. Narrow the matches down
+ * with pickResourceForHost.
+ */
+export function resourceHostCondition(host: string) {
+    // Build wildcard domain variants to match against.
+    // For a domain like "me.example.test.com", we want to match:
+    //   - "*.example.test.com" (subdomain wildcard)
+    //   - "*.test.com" (parent wildcard, i.e. just "*" subdomain on parent)
+    const parts = host.split(".");
+    const wildcardCandidates: string[] = [];
+    for (let i = 1; i < parts.length; i++) {
+        wildcardCandidates.push(`*.${parts.slice(i).join(".")}`);
+    }
+
+    return or(
+        // Exact match
+        eq(resources.fullDomain, host),
+        // Wildcard match: resource fullDomain is one of the wildcard candidates
+        wildcardCandidates.length > 0
+            ? and(
+                  eq(resources.wildcard, true),
+                  inArray(resources.fullDomain, wildcardCandidates)
+              )
+            : sql`false`,
+        // Base match: "*.me.example.test.com" also serving "me.example.test.com"
+        and(
+            eq(resources.wildcard, true),
+            eq(resources.matchBaseDomain, true),
+            eq(resources.fullDomain, `*.${host}`)
+        )
+    );
+}
+
+/**
+ * Get resource by domain with pincode and password information
+ */
+export async function getResourceByDomain(
+    domain: string
+): Promise<ResourceWithAuth | null> {
+    const sharedPolicy = alias(resourcePolicies, "sharedPolicy");
+    const defaultPolicy = alias(resourcePolicies, "defaultPolicy");
+    const sharedPolicyPincode = alias(
+        resourcePolicyPincode,
+        "sharedPolicyPincode"
+    );
+    const defaultPolicyPincode = alias(
+        resourcePolicyPincode,
+        "defaultPolicyPincode"
+    );
+    const sharedPolicyPassword = alias(
+        resourcePolicyPassword,
+        "sharedPolicyPassword"
+    );
+    const defaultPolicyPassword = alias(
+        resourcePolicyPassword,
+        "defaultPolicyPassword"
+    );
+    const sharedPolicyHeaderAuth = alias(
+        resourcePolicyHeaderAuth,
+        "sharedPolicyHeaderAuth"
+    );
+    const defaultPolicyHeaderAuth = alias(
+        resourcePolicyHeaderAuth,
+        "defaultPolicyHeaderAuth"
+    );
+
+    const potentialResults = await db
+        .select()
+        .from(resources)
+        .leftJoin(
+            resourcePincode,
+            eq(resourcePincode.resourceId, resources.resourceId)
+        )
+        .leftJoin(
+            resourcePassword,
+            eq(resourcePassword.resourceId, resources.resourceId)
+        )
+        .leftJoin(
+            resourceHeaderAuth,
+            eq(resourceHeaderAuth.resourceId, resources.resourceId)
+        )
+        .leftJoin(
+            resourceHeaderAuthExtendedCompatibility,
+            eq(
+                resourceHeaderAuthExtendedCompatibility.resourceId,
+                resources.resourceId
+            )
+        )
+        .leftJoin(
+            sharedPolicy,
+            eq(sharedPolicy.resourcePolicyId, resources.resourcePolicyId)
+        )
+        .leftJoin(
+            sharedPolicyPincode,
+            eq(
+                sharedPolicyPincode.resourcePolicyId,
+                sharedPolicy.resourcePolicyId
+            )
+        )
+        .leftJoin(
+            sharedPolicyPassword,
+            eq(
+                sharedPolicyPassword.resourcePolicyId,
+                sharedPolicy.resourcePolicyId
+            )
+        )
+        .leftJoin(
+            sharedPolicyHeaderAuth,
+            eq(
+                sharedPolicyHeaderAuth.resourcePolicyId,
+                sharedPolicy.resourcePolicyId
+            )
+        )
+        .leftJoin(
+            defaultPolicy,
+            eq(
+                defaultPolicy.resourcePolicyId,
+                resources.defaultResourcePolicyId
+            )
+        )
+        .leftJoin(
+            defaultPolicyPincode,
+            eq(
+                defaultPolicyPincode.resourcePolicyId,
+                defaultPolicy.resourcePolicyId
+            )
+        )
+        .leftJoin(
+            defaultPolicyPassword,
+            eq(
+                defaultPolicyPassword.resourcePolicyId,
+                defaultPolicy.resourcePolicyId
+            )
+        )
+        .leftJoin(
+            defaultPolicyHeaderAuth,
+            eq(
+                defaultPolicyHeaderAuth.resourcePolicyId,
+                defaultPolicy.resourcePolicyId
+            )
+        )
+        .innerJoin(orgs, eq(orgs.orgId, resources.orgId))
+        .where(resourceHostCondition(domain));
+
+    if (!potentialResults.length) {
+        return null;
+    }
+
+    const result = pickResourceForHost(
+        potentialResults,
+        domain,
+        (r) => r.resources?.fullDomain
+    );
+
+    if (!result) {
+        return null;
+    }
+
+    // If a shared (custom) policy is assigned to the resource, use ONLY
+    // its values — do not fall back to the default policy. The default
+    // policy is only consulted when no shared policy is assigned at all.
+    const hasSharedPolicy = result.sharedPolicy !== null;
+
+    const effectivePolicyPincode = hasSharedPolicy
+        ? result.sharedPolicyPincode
+        : (result.defaultPolicyPincode ?? null);
+    const effectivePolicyPassword = hasSharedPolicy
+        ? result.sharedPolicyPassword
+        : (result.defaultPolicyPassword ?? null);
+    const effectivePolicyHeaderAuth = hasSharedPolicy
+        ? result.sharedPolicyHeaderAuth
+        : (result.defaultPolicyHeaderAuth ?? null);
+    const selectedPolicy = hasSharedPolicy
+        ? result.sharedPolicy
+        : result.defaultPolicy;
+    const effectiveApplyRules =
+        selectedPolicy?.applyRules ?? result.resources.applyRules;
+    const effectiveSSO = selectedPolicy?.sso ?? result.resources.sso;
+    const effectiveEmailWhitelistEnabled =
+        selectedPolicy?.emailWhitelistEnabled ??
+        result.resources.emailWhitelistEnabled;
+
+    return {
+        resource: {
+            ...result.resources,
+            applyRules: effectiveApplyRules,
+            sso: effectiveSSO,
+            emailWhitelistEnabled: effectiveEmailWhitelistEnabled
+        }, // doing this for backward compatability so the remote nodes get the value as part of the resource struct
+        pincode: effectivePolicyPincode ?? result.resourcePincode,
+        password: effectivePolicyPassword ?? result.resourcePassword,
+        headerAuth: effectivePolicyHeaderAuth ?? result.resourceHeaderAuth,
+        headerAuthExtendedCompatibility: effectivePolicyHeaderAuth
+            ? ({
+                  headerAuthExtendedCompatibilityId: 0,
+                  resourceId: result.resources.resourceId,
+                  extendedCompatibilityIsActivated:
+                      effectivePolicyHeaderAuth.extendedCompatibility
+              } as ResourceHeaderAuthExtendedCompatibility)
+            : result.resourceHeaderAuthExtendedCompatibility,
+        applyRules: effectiveApplyRules,
+        sso: effectiveSSO,
+        emailWhitelistEnabled: effectiveEmailWhitelistEnabled,
+        org: result.orgs
+    };
+}
+
+/**
+ * Get user session with user information
+ */
+export async function getUserSessionWithUser(
+    userSessionId: string
+): Promise<UserSessionWithUser | null> {
+    const [res] = await db
+        .select()
+        .from(sessions)
+        .leftJoin(users, eq(users.userId, sessions.userId))
+        .where(eq(sessions.sessionId, userSessionId));
+
+    if (!res) {
+        return null;
+    }
+
+    return {
+        session: res.session,
+        user: res.user
+    };
+}
+
+/**
+ * Get role name by role ID (for display).
+ */
+export async function getRoleName(roleId: number): Promise<string | null> {
+    const [row] = await db
+        .select({ name: roles.name })
+        .from(roles)
+        .where(eq(roles.roleId, roleId))
+        .limit(1);
+    return row?.name ?? null;
+}
+
+/**
+ * Check if role has access to resource (direct or via resource policy)
+ */
+export async function getRoleResourceAccess(
+    resourceId: number,
+    roleIds: number[]
+) {
+    const [direct, viaPolicies] = await Promise.all([
+        db
+            .select()
+            .from(roleResources)
+            .where(
+                and(
+                    eq(roleResources.resourceId, resourceId),
+                    inArray(roleResources.roleId, roleIds)
+                )
+            ),
+        db
+            .select({
+                roleId: rolePolicies.roleId,
+                resourcePolicyId: rolePolicies.resourcePolicyId
+            })
+            .from(rolePolicies)
+            .innerJoin(
+                resources,
+                // Shared policy wins; only use default policy when no shared
+                // policy is assigned to the resource.
+                or(
+                    eq(
+                        resources.resourcePolicyId,
+                        rolePolicies.resourcePolicyId
+                    ),
+                    and(
+                        isNull(resources.resourcePolicyId),
+                        eq(
+                            resources.defaultResourcePolicyId,
+                            rolePolicies.resourcePolicyId
+                        )
+                    )
+                )
+            )
+            .where(
+                and(
+                    eq(resources.resourceId, resourceId),
+                    inArray(rolePolicies.roleId, roleIds)
+                )
+            )
+    ]);
+
+    const combined = [...direct, ...viaPolicies];
+    return combined.length > 0 ? combined : null;
+}
+
+/**
+ * Check if user has access to resource (direct or via resource policy)
+ */
+export async function getUserResourceAccess(
+    userId: string,
+    resourceId: number
+) {
+    const [direct, viaPolicies] = await Promise.all([
+        db
+            .select()
+            .from(userResources)
+            .where(
+                and(
+                    eq(userResources.userId, userId),
+                    eq(userResources.resourceId, resourceId)
+                )
+            )
+            .limit(1),
+        db
+            .select({
+                userId: userPolicies.userId,
+                resourcePolicyId: userPolicies.resourcePolicyId
+            })
+            .from(userPolicies)
+            .innerJoin(
+                resources,
+                // Shared policy wins; only use default policy when no shared
+                // policy is assigned to the resource.
+                or(
+                    eq(
+                        resources.resourcePolicyId,
+                        userPolicies.resourcePolicyId
+                    ),
+                    and(
+                        isNull(resources.resourcePolicyId),
+                        eq(
+                            resources.defaultResourcePolicyId,
+                            userPolicies.resourcePolicyId
+                        )
+                    )
+                )
+            )
+            .where(
+                and(
+                    eq(resources.resourceId, resourceId),
+                    eq(userPolicies.userId, userId)
+                )
+            )
+            .limit(1)
+    ]);
+
+    return direct[0] ?? viaPolicies[0] ?? null;
+}
+
+/**
+ * Get resource rules for a given resource (direct and via resource policy)
+ */
+export async function getResourceRules(
+    resourceId: number
+): Promise<ResourceRule[]> {
+    const [directRules, policyRules] = await Promise.all([
+        db
+            .select()
+            .from(resourceRules)
+            .where(eq(resourceRules.resourceId, resourceId)),
+        db
+            .select({
+                ruleId: resourcePolicyRules.ruleId,
+                resourceId: sql<number>`${resourceId}`,
+                enabled: resourcePolicyRules.enabled,
+                priority: resourcePolicyRules.priority,
+                action: resourcePolicyRules.action,
+                match: resourcePolicyRules.match,
+                value: resourcePolicyRules.value
+            })
+            .from(resourcePolicyRules)
+            .innerJoin(
+                resources,
+                // Shared policy wins; only use default policy when no shared
+                // policy is assigned to the resource.
+                or(
+                    eq(
+                        resources.resourcePolicyId,
+                        resourcePolicyRules.resourcePolicyId
+                    ),
+                    and(
+                        isNull(resources.resourcePolicyId),
+                        eq(
+                            resources.defaultResourcePolicyId,
+                            resourcePolicyRules.resourcePolicyId
+                        )
+                    )
+                )
+            )
+            .where(eq(resources.resourceId, resourceId))
+    ]);
+
+    const maxDirectPriority = directRules.reduce(
+        (max, r) => Math.max(max, r.priority),
+        0
+    );
+    const offsetPolicyRules = policyRules.map((r) => ({
+        ...r,
+        priority: maxDirectPriority + r.priority
+    }));
+
+    return [...directRules, ...offsetPolicyRules] as ResourceRule[];
+}
+
+/**
+ * Get the whitelisted email associated with a resource session's whitelist
+ * match (either a direct resource whitelist entry or a resource policy
+ * whitelist entry).
+ */
+export async function getWhitelistEmail(
+    whitelistId?: number | null,
+    policyWhitelistId?: number | null
+): Promise<string | null> {
+    if (whitelistId) {
+        const [row] = await db
+            .select({ email: resourceWhitelist.email })
+            .from(resourceWhitelist)
+            .where(eq(resourceWhitelist.whitelistId, whitelistId))
+            .limit(1);
+        return row?.email ?? null;
+    }
+
+    if (policyWhitelistId) {
+        const [row] = await db
+            .select({ email: resourcePolicyWhiteList.email })
+            .from(resourcePolicyWhiteList)
+            .where(eq(resourcePolicyWhiteList.whitelistId, policyWhitelistId))
+            .limit(1);
+        return row?.email ?? null;
+    }
+
+    return null;
+}
+
+/**
+ * Get organization login page
+ */
+export async function getOrgLoginPage(
+    orgId: string
+): Promise<LoginPage | null> {
+    const [result] = await db
+        .select()
+        .from(loginPageOrg)
+        .where(eq(loginPageOrg.orgId, orgId))
+        .innerJoin(
+            loginPage,
+            eq(loginPageOrg.loginPageId, loginPage.loginPageId)
+        )
+        .limit(1);
+
+    if (!result) {
+        return null;
+    }
+
+    return result?.loginPage;
+}

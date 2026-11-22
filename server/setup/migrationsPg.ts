@@ -1,0 +1,229 @@
+#! /usr/bin/env node
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { db } from "../db/pg";
+import semver from "semver";
+import { versionMigrations } from "../db/pg";
+import { __DIRNAME, APP_VERSION } from "@server/lib/consts";
+import path from "path";
+import { build } from "@server/build";
+import m1 from "./scriptsPg/1.6.0";
+import m2 from "./scriptsPg/1.7.0";
+import m3 from "./scriptsPg/1.8.0";
+import m4 from "./scriptsPg/1.9.0";
+import m5 from "./scriptsPg/1.10.0";
+import m6 from "./scriptsPg/1.10.2";
+import m7 from "./scriptsPg/1.11.0";
+import m8 from "./scriptsPg/1.11.1";
+import m9 from "./scriptsPg/1.12.0";
+import m10 from "./scriptsPg/1.13.0";
+import m11 from "./scriptsPg/1.14.0";
+import m12 from "./scriptsPg/1.15.0";
+import m13 from "./scriptsPg/1.15.3";
+import m14 from "./scriptsPg/1.15.4";
+import m15 from "./scriptsPg/1.16.0";
+import m16 from "./scriptsPg/1.17.0";
+import m17 from "./scriptsPg/1.18.0";
+import m18 from "./scriptsPg/1.18.3";
+import m19 from "./scriptsPg/1.18.4";
+import m20 from "./scriptsPg/1.19.0";
+import m21 from "./scriptsPg/1.20.0";
+import m22 from "./scriptsPg/1.21.0";
+import m23 from "./scriptsPg/1.22.0";
+import m24 from "./scriptsPg/1.23.0";
+import m25 from "./scriptsPg/1.24.0";
+import m26 from "./scriptsPg/1.25.0";
+import m27 from "./scriptsPg/1.25.3";
+import m28 from "./scriptsPg/1.26.0";
+import m29 from "./scriptsPg/1.27.0";
+import m30 from "./scriptsPg/1.27.1";
+
+// THIS CANNOT IMPORT ANYTHING FROM THE SERVER
+// EXCEPT FOR THE DATABASE AND THE SCHEMA
+
+// Define the migration list with versions and their corresponding functions
+const migrations = [
+    { version: "1.6.0", run: m1 },
+    { version: "1.7.0", run: m2 },
+    { version: "1.8.0", run: m3 },
+    { version: "1.9.0", run: m4 },
+    { version: "1.10.0", run: m5 },
+    { version: "1.10.2", run: m6 },
+    { version: "1.11.0", run: m7 },
+    { version: "1.11.1", run: m8 },
+    { version: "1.12.0", run: m9 },
+    { version: "1.13.0", run: m10 },
+    { version: "1.14.0", run: m11 },
+    { version: "1.15.0", run: m12 },
+    { version: "1.15.3", run: m13 },
+    { version: "1.15.4", run: m14 },
+    { version: "1.16.0", run: m15 },
+    { version: "1.17.0", run: m16 },
+    { version: "1.18.0", run: m17 },
+    { version: "1.18.3", run: m18 },
+    { version: "1.18.4", run: m19 },
+    { version: "1.19.0", run: m20 },
+    { version: "1.20.0", run: m21 },
+    { version: "1.21.0", run: m22 },
+    { version: "1.22.0", run: m23 },
+    { version: "1.23.0", run: m24 },
+    { version: "1.24.0", run: m25 },
+    { version: "1.25.0", run: m26 },
+    { version: "1.25.3", run: m27 },
+    { version: "1.26.0", run: m28 },
+    { version: "1.27.0", run: m29 },
+    { version: "1.27.1", run: m30 }
+    // Add new migrations here as they are created
+] as {
+    version: string;
+    run: () => Promise<void>;
+}[];
+
+await run();
+
+// The pg Pool is created with allowExitOnIdle: false (see poolConfig.ts) so
+// its sockets keep the event loop alive even when idle. Without an explicit
+// exit here, this one-shot script would hang until the pool's
+// idleTimeoutMillis elapses before the process could terminate.
+process.exit(0);
+
+async function run() {
+    // run the migrations
+    await runMigrations();
+}
+
+export async function runMigrations() {
+    if (build == "saas") {
+        console.log("Running in SaaS mode, skipping migrations...");
+        return;
+    }
+    if (process.env.DISABLE_MIGRATIONS) {
+        console.log("Migrations are disabled. Skipping...");
+        return;
+    }
+    try {
+        const appVersion = APP_VERSION;
+
+        // determine if the migrations table exists
+        const exists = await db
+            .select()
+            .from(versionMigrations)
+            .limit(1)
+            .execute()
+            .then((res) => res.length > 0)
+            .catch(() => false);
+
+        if (exists) {
+            console.log("Migrations table exists, running scripts...");
+            await executeScripts();
+        } else {
+            console.log("Migrations table does not exist, creating it...");
+            console.log("Running migrations...");
+            try {
+                await migrate(db, {
+                    migrationsFolder: path.join(__DIRNAME, "init") // put here during the docker build
+                });
+                console.log("Migrations completed successfully.");
+            } catch (error) {
+                console.error("Error running migrations:", error);
+            }
+
+            await db
+                .insert(versionMigrations)
+                .values({
+                    version: appVersion,
+                    executedAt: Date.now()
+                })
+                .execute();
+        }
+    } catch (e) {
+        console.error("Error running migrations:", e);
+        await new Promise((resolve) =>
+            setTimeout(resolve, 1000 * 60 * 60 * 24 * 1)
+        );
+    }
+}
+
+async function executeScripts() {
+    try {
+        // Get the last executed version from the database
+        const lastExecuted = await db.select().from(versionMigrations);
+
+        // Filter and sort migrations
+        const pendingMigrations = lastExecuted
+            .map((m) => m)
+            .sort((a, b) => semver.compare(b.version, a.version));
+        const startVersion = pendingMigrations[0]?.version ?? "0.0.0";
+        console.log(`Starting migrations from version ${startVersion}`);
+
+        const migrationsToRun = migrations.filter((migration) =>
+            shouldRunMigration(migration.version, startVersion)
+        );
+
+        console.log(
+            "Migrations to run:",
+            migrationsToRun.map((m) => m.version).join(", ")
+        );
+
+        // Run migrations in order
+        for (const migration of migrationsToRun) {
+            console.log(`Running migration ${migration.version}`);
+
+            try {
+                await migration.run();
+
+                // Update version in database
+                await db
+                    .insert(versionMigrations)
+                    .values({
+                        version: migration.version,
+                        executedAt: Date.now()
+                    })
+                    .execute();
+
+                console.log(
+                    `Successfully completed migration ${migration.version}`
+                );
+            } catch (e) {
+                if (
+                    e instanceof Error &&
+                    typeof (e as any).code === "string" &&
+                    (e as any).code === "23505"
+                ) {
+                    console.error("Migration has already run! Skipping...");
+                    continue; // or return, depending on context
+                }
+
+                console.error(
+                    `Failed to run migration ${migration.version}:`,
+                    e
+                );
+                throw e;
+            }
+        }
+
+        console.log("All migrations completed successfully");
+    } catch (error) {
+        console.error("Migration process failed:", error);
+        throw error;
+    }
+}
+
+function shouldRunMigration(migrationVersion: string, currentVersion: string) {
+    const migration = semver.parse(migrationVersion);
+    const current = semver.parse(currentVersion);
+
+    // Treat x.y.z-rc.* as equivalent to x.y.z so restarts on RC builds do not re-run the same migration.
+    if (
+        migration &&
+        current &&
+        migration.prerelease.length === 0 &&
+        current.prerelease[0] === "rc" &&
+        migration.major === current.major &&
+        migration.minor === current.minor &&
+        migration.patch === current.patch
+    ) {
+        return false;
+    }
+
+    return semver.gt(migrationVersion, currentVersion);
+}

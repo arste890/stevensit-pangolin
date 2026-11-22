@@ -1,0 +1,585 @@
+import fs from "fs";
+import * as yaml from "js-yaml";
+import { configFilePath1, configFilePath2 } from "./consts";
+import { z } from "zod";
+import stoi from "./stoi";
+import { getEnvOrYaml, readEnvOrFile } from "./getEnvOrYaml";
+import { getRunMode } from "./runMode";
+// type-only: offlineThresholds imports config, which imports this file
+import type { OfflineThresholds } from "@server/lib/offlineThresholds";
+
+export const DEFAULT_OFFLINE_THRESHOLDS: OfflineThresholds = {
+    checkIntervalMs: 30 * 1000, // 30 seconds
+    newtMs: 2 * 60 * 1000, // 2 minutes
+    newtWireguardMs: 8 * 60 * 1000, // 8 minutes
+    olmMs: 2 * 60 * 1000, // 2 minutes
+    remoteExitNodeMs: 2 * 60 * 1000 // 2 minutes
+};
+
+const portSchema = z.number().positive().gt(0).lte(65535);
+
+export const configSchema = z
+    .object({
+        app: z
+            .object({
+                dashboard_url: z
+                    .url()
+                    .pipe(z.url())
+                    .transform((url) => url.toLowerCase())
+                    .optional(),
+                log_level: z
+                    .enum(["debug", "info", "warn", "error"])
+                    .optional()
+                    .default("info"),
+                save_logs: z.boolean().optional().default(false),
+                log_failed_attempts: z.boolean().optional().default(false),
+                telemetry: z
+                    .object({
+                        anonymous_usage: z.boolean().optional().default(true)
+                    })
+                    .prefault({}),
+                notifications: z
+                    .object({
+                        product_updates: z.boolean().optional().default(true),
+                        new_releases: z.boolean().optional().default(true)
+                    })
+                    .prefault({})
+            })
+            .optional()
+            .default({
+                log_level: "info",
+                save_logs: false,
+                log_failed_attempts: false,
+                telemetry: {
+                    anonymous_usage: true
+                },
+                notifications: {
+                    product_updates: true,
+                    new_releases: true
+                }
+            }),
+        domains: z
+            .record(
+                z.string(),
+                z.object({
+                    base_domain: z
+                        .string()
+                        .nonempty("base_domain must not be empty")
+                        .transform((url) => url.toLowerCase()),
+                    cert_resolver: z.string().optional(), // null falls back to traefik.cert_resolver
+                    prefer_wildcard_cert: z.boolean().optional().default(false)
+                })
+            )
+            .optional(),
+        server: z
+            .object({
+                integration_port: portSchema
+                    .optional()
+                    .default(3003)
+                    .transform(stoi)
+                    .pipe(portSchema.optional()),
+                external_port: portSchema
+                    .optional()
+                    .default(3000)
+                    .transform(stoi)
+                    .pipe(portSchema),
+                internal_port: portSchema
+                    .optional()
+                    .default(3001)
+                    .transform(stoi)
+                    .pipe(portSchema),
+                ai_gateway_port: portSchema
+                    .optional()
+                    .default(3005)
+                    .transform(stoi)
+                    .pipe(portSchema),
+                badger_override: z.string().optional(),
+                ai_gateway_override: z.string().optional(),
+                next_port: portSchema
+                    .optional()
+                    .default(3002)
+                    .transform(stoi)
+                    .pipe(portSchema),
+                internal_hostname: z
+                    .string()
+                    .optional()
+                    .default("pangolin")
+                    .transform((url) => url.toLowerCase()),
+                session_cookie_name: z
+                    .string()
+                    .optional()
+                    .default("p_session_token"),
+                resource_access_token_param: z
+                    .string()
+                    .optional()
+                    .default("p_token"),
+                resource_access_token_headers: z
+                    .object({
+                        id: z.string().optional().default("P-Access-Token-Id"),
+                        token: z.string().optional().default("P-Access-Token")
+                    })
+                    .prefault({}),
+                remote_headers: z
+                    .object({
+                        user_id: z
+                            .string()
+                            .optional()
+                            .default("Remote-User-Id"),
+                        virtual_api_key_id: z
+                            .string()
+                            .optional()
+                            .default("Remote-Virtual-Api-Key-Id"),
+                        user: z.string().optional().default("Remote-User"),
+                        email: z.string().optional().default("Remote-Email"),
+                        name: z.string().optional().default("Remote-Name"),
+                        role: z.string().optional().default("Remote-Role")
+                    })
+                    .prefault({}),
+                resource_session_request_param: z
+                    .string()
+                    .optional()
+                    .default("resource_session_request_param"),
+                dashboard_session_length_hours: z
+                    .number()
+                    .positive()
+                    .gt(0)
+                    .optional()
+                    .default(720),
+                resource_session_length_hours: z
+                    .number()
+                    .positive()
+                    .gt(0)
+                    .optional()
+                    .default(720),
+                cors: z
+                    .object({
+                        origins: z.array(z.string()).optional(),
+                        methods: z.array(z.string()).optional(),
+                        allowed_headers: z.array(z.string()).optional(),
+                        credentials: z.boolean().optional()
+                    })
+                    .optional(),
+                trust_proxy: z.int().gte(0).optional().default(1),
+                trust_ips: z.array(z.string()).optional().default([]),
+                custom_ip_header: z.string().optional().default(""),
+                // Opt-in: have Traefik/Badger stamp the resolved client IP
+                // into a dedicated header (X-Pangolin-Client-Ip) on the
+                // site-resource AI gateway route, so it survives an
+                // intermediary proxy between Traefik and the gateway that
+                // overwrites X-Forwarded-For/X-Real-Ip instead of appending
+                // to them. Off by default since it requires a Badger
+                // version that supports realIpHeader.
+                enable_ai_gateway_client_ip_header: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .transform((val) => {
+                        const envVal = readEnvOrFile(
+                            "ENABLE_AI_GATEWAY_CLIENT_IP_HEADER"
+                        );
+                        return envVal !== undefined ? envVal === "true" : val;
+                    }),
+                secret: z
+                    .string()
+                    .pipe(z.string().min(8))
+                    .optional()
+                    .transform(getEnvOrYaml("SERVER_SECRET")),
+                maxmind_db_path: z.string().optional(),
+                maxmind_asn_path: z.string().optional()
+            })
+            .prefault({}),
+        postgres: z
+            .object({
+                connection_string: z.string().optional(),
+                replicas: z
+                    .array(
+                        z.object({
+                            connection_string: z.string()
+                        })
+                    )
+                    .optional(),
+                pool: z
+                    .object({
+                        max_connections: z
+                            .number()
+                            .positive()
+                            .optional()
+                            .default(20),
+                        max_replica_connections: z
+                            .number()
+                            .positive()
+                            .optional()
+                            .default(10),
+                        idle_timeout_ms: z
+                            .number()
+                            .positive()
+                            .optional()
+                            .default(30000),
+                        connection_timeout_ms: z
+                            .number()
+                            .positive()
+                            .optional()
+                            .default(5000),
+                        jit_mode: z.boolean().default(false)
+                    })
+                    .prefault({})
+            })
+            .optional(),
+        postgres_logs: z
+            .object({
+                connection_string: z
+                    .string()
+                    .optional()
+                    .transform(getEnvOrYaml("POSTGRES_LOGS_CONNECTION_STRING")),
+                replicas: z
+                    .array(
+                        z.object({
+                            connection_string: z.string()
+                        })
+                    )
+                    .optional(),
+                pool: z
+                    .object({
+                        max_connections: z
+                            .number()
+                            .positive()
+                            .optional()
+                            .default(20),
+                        max_replica_connections: z
+                            .number()
+                            .positive()
+                            .optional()
+                            .default(10),
+                        idle_timeout_ms: z
+                            .number()
+                            .positive()
+                            .optional()
+                            .default(30000),
+                        connection_timeout_ms: z
+                            .number()
+                            .positive()
+                            .optional()
+                            .default(5000)
+                    })
+                    .prefault({})
+            })
+            .optional(),
+        traefik: z
+            .object({
+                http_entrypoint: z.string().optional().default("web"),
+                https_entrypoint: z.string().optional().default("websecure"),
+                additional_middlewares: z.array(z.string()).optional(),
+                cert_resolver: z.string().optional().default("letsencrypt"),
+                prefer_wildcard_cert: z.boolean().optional().default(false),
+                certificates_path: z.string().default("/var/certificates"),
+                monitor_interval: z.number().default(5000),
+                dynamic_cert_config_path: z
+                    .string()
+                    .optional()
+                    .default("/var/dynamic/cert_config.yml"),
+                dynamic_router_config_path: z
+                    .string()
+                    .optional()
+                    .default("/var/dynamic/router_config.yml"),
+                static_domains: z.array(z.string()).optional().default([]),
+                site_types: z
+                    .array(z.string())
+                    .optional()
+                    .default(["newt", "wireguard", "local"]),
+                allow_raw_resources: z.boolean().optional().default(true),
+                file_mode: z.boolean().optional().default(false),
+                pp_transport_prefix: z
+                    .string()
+                    .optional()
+                    .default("pp-transport-v"),
+                rate_limit: z
+                    .object({
+                        average: z
+                            .number()
+                            .positive()
+                            .gt(0)
+                            .optional()
+                            .default(30),
+                        burst: z
+                            .number()
+                            .positive()
+                            .gt(0)
+                            .optional()
+                            .default(50)
+                    })
+                    .prefault({})
+            })
+            .prefault({}),
+        gerbil: z
+            .object({
+                exit_node_name: z.string().optional(),
+                start_port: portSchema
+                    .optional()
+                    .default(51820)
+                    .transform(stoi)
+                    .pipe(portSchema),
+                clients_start_port: portSchema
+                    .optional()
+                    .default(21820)
+                    .transform(stoi)
+                    .pipe(portSchema),
+                base_endpoint: z
+                    .string()
+                    .optional()
+                    // The standalone DNS server never creates exit nodes
+                    .transform((url) =>
+                        url === undefined && getRunMode() === "dns" ? "" : url
+                    )
+                    .pipe(z.string())
+                    .transform((url) => url.toLowerCase()),
+                subnet_group: z.string().optional().default("100.89.137.0/18"),
+                block_size: z.number().positive().gt(0).optional().default(22),
+                site_block_size: z
+                    .number()
+                    .positive()
+                    .gt(0)
+                    .optional()
+                    .default(30)
+            })
+            .prefault({}),
+        orgs: z
+            .object({
+                block_size: z.number().positive().gt(0).optional().default(24),
+                subnet_group: z.string().optional().default("100.90.128.0/20"),
+                utility_subnet_group: z
+                    .string()
+                    .optional()
+                    .default("100.96.128.0/20") //just hardcode this for now as well
+            })
+            .optional()
+            .default({
+                block_size: 24,
+                subnet_group: "100.90.128.0/20",
+                utility_subnet_group: "100.96.128.0/20"
+            }),
+        rate_limits: z
+            .object({
+                global: z
+                    .object({
+                        window_minutes: z
+                            .number()
+                            .positive()
+                            .gt(0)
+                            .optional()
+                            .default(1),
+                        max_requests: z
+                            .number()
+                            .positive()
+                            .gt(0)
+                            .optional()
+                            .default(500)
+                    })
+                    .prefault({}),
+                auth: z
+                    .object({
+                        window_minutes: z
+                            .number()
+                            .positive()
+                            .gt(0)
+                            .optional()
+                            .default(1),
+                        max_requests: z
+                            .number()
+                            .positive()
+                            .gt(0)
+                            .optional()
+                            .default(500)
+                    })
+                    .prefault({})
+            })
+            .prefault({}),
+        email: z
+            .object({
+                smtp_host: z.string().optional(),
+                smtp_port: portSchema.optional(),
+                smtp_user: z
+                    .string()
+                    .optional()
+                    .transform(getEnvOrYaml("EMAIL_SMTP_USER")),
+                smtp_pass: z
+                    .string()
+                    .optional()
+                    .transform(getEnvOrYaml("EMAIL_SMTP_PASS")),
+                smtp_secure: z.boolean().optional(),
+                smtp_tls_reject_unauthorized: z.boolean().optional(),
+                no_reply: z.email().optional()
+            })
+            .optional(),
+        flags: z
+            .object({
+                require_email_verification: z.boolean().optional(),
+                disable_signup_without_invite: z.boolean().optional(),
+                disable_user_create_org: z.boolean().optional(),
+                allow_raw_resources: z.boolean().optional(),
+                enable_integration_api: z.boolean().optional(),
+                enable_api_create_user_sessions: z.boolean().optional().default(false),
+                disable_local_sites: z.boolean().optional(),
+                disable_basic_wireguard_sites: z.boolean().optional(),
+                disable_config_managed_domains: z.boolean().optional(),
+                disable_product_help_banners: z.boolean().optional(),
+                disable_enterprise_features: z.boolean().optional(),
+                disable_virtual_api_keys_ui: z.boolean().optional(),
+                // Hide org names next to IdPs on the login pages and redact
+                // org names/IDs from the unauthenticated user lookup API
+                disable_login_org_names: z.boolean().optional(),
+                enable_acme_cert_sync: z.boolean().optional().default(true),
+                disable_private_http_placeholder: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+            })
+            .optional(),
+        acme: z
+            .object({
+                acme_json_path: z
+                    .string()
+                    .optional()
+                    .default("config/letsencrypt/acme.json"),
+                acme_http_endpoint: z.string().optional(),
+                sync_interval_ms: z.number().optional().default(5000)
+            })
+            .optional(),
+        ai: z
+            .object({
+                model_catalog: z
+                    .object({
+                        upstream_url: z
+                            .url()
+                            .optional()
+                            .default("https://api.fossorial.io/api/v1/models"),
+                        // No default - only used when an operator wants to
+                        // pin the catalog to a local file instead of
+                        // fetching it from upstream_url.
+                        file: z.string().optional(),
+                        // No default - only used when an operator wants to
+                        // merge the content of the json file with the upstream catalog. This is useful for adding
+                        // custom models to the catalog without having to maintain a separate fork of the upstream catalog.
+                        merge_file: z.string().optional(),
+                        refresh_interval_min_hours: z
+                            .number()
+                            .positive()
+                            .gt(0)
+                            .optional()
+                            .default(6),
+                        refresh_interval_max_hours: z
+                            .number()
+                            .positive()
+                            .gt(0)
+                            .optional()
+                            .default(12)
+                    })
+                    .prefault({})
+            })
+            .prefault({}),
+        // How long a newt site / olm client / remote exit node has to go
+        // without a ping before the offline checker marks it offline, and how
+        // often the checkers run.
+        offline_checker: z
+            .object({
+                check_interval_ms: z
+                    .number()
+                    .int()
+                    .positive()
+                    .default(DEFAULT_OFFLINE_THRESHOLDS.checkIntervalMs),
+                newt_threshold_ms: z
+                    .number()
+                    .int()
+                    .default(DEFAULT_OFFLINE_THRESHOLDS.newtMs),
+                // wireguard sites don't ping, so they are judged by their
+                // last bandwidth update instead
+                newt_wireguard_threshold_ms: z
+                    .number()
+                    .int()
+                    .default(DEFAULT_OFFLINE_THRESHOLDS.newtWireguardMs),
+                olm_threshold_ms: z
+                    .number()
+                    .int()
+                    .default(DEFAULT_OFFLINE_THRESHOLDS.olmMs),
+                remote_exit_node_threshold_ms: z
+                    .number()
+                    .int()
+                    .default(DEFAULT_OFFLINE_THRESHOLDS.remoteExitNodeMs)
+            })
+            .prefault({})
+    })
+    .refine(
+        (data) => {
+            const keys = Object.keys(data.domains || {});
+            if (data.flags?.disable_config_managed_domains) {
+                return true;
+            }
+
+            if (keys.length === 0) {
+                return false;
+            }
+            return true;
+        },
+        {
+            error: "At least one domain must be defined"
+        }
+    )
+    .refine(
+        (data) => {
+            // The standalone DNS server never uses the secret
+            if (getRunMode() === "dns") {
+                return true;
+            }
+            // If hybrid is not defined, server secret must be defined
+            return (
+                data.server?.secret !== undefined &&
+                data.server.secret.length > 0
+            );
+        },
+        {
+            error: "Server secret must be defined"
+        }
+    )
+    .refine(
+        (data) => {
+            // If hybrid is not defined, dashboard_url must be defined
+            return (
+                data.app.dashboard_url !== undefined &&
+                data.app.dashboard_url.length > 0
+            );
+        },
+        {
+            error: "Dashboard URL must be defined"
+        }
+    );
+
+export function readConfigFile() {
+    const loadConfig = (configPath: string) => {
+        try {
+            const yamlContent = fs.readFileSync(configPath, "utf8");
+            const config = yaml.load(yamlContent);
+            return config;
+        } catch (error) {
+            if (error instanceof Error) {
+                throw new Error(
+                    `Error loading configuration file: ${error.message}`
+                );
+            }
+            throw error;
+        }
+    };
+
+    let environment: any;
+    if (fs.existsSync(configFilePath1)) {
+        environment = loadConfig(configFilePath1);
+    } else if (fs.existsSync(configFilePath2)) {
+        environment = loadConfig(configFilePath2);
+    }
+
+    if (!environment) {
+        throw new Error(
+            "No configuration file found. Please create one. https://docs.pangolin.net/self-host/advanced/config-file"
+        );
+    }
+
+    return environment;
+}

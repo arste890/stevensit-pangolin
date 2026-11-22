@@ -1,0 +1,99 @@
+import { db, exitNodes, Transaction } from "@server/db";
+import logger from "@server/logger";
+import { eq } from "drizzle-orm";
+
+export async function verifyExitNodeOrgAccess(
+    exitNodeId: number,
+    orgId: string
+) {
+    const [exitNode] = await db
+        .select()
+        .from(exitNodes)
+        .where(eq(exitNodes.exitNodeId, exitNodeId));
+
+    // For any other type, deny access
+    return { hasAccess: true, exitNode };
+}
+
+export async function listExitNodes(
+    orgId: string,
+    filterOnline = false,
+    noCloud = false,
+    // Accepted for parity with the enterprise implementation (used there for
+    // site-label filtering of remote exit nodes). The OSS build has no remote
+    // exit nodes, so it is unused here.
+    siteId?: number,
+    // Same as above: accepted for parity, unused since the OSS build has no
+    // remote exit nodes to exclude.
+    noRemote = false
+) {
+    // TODO: pick which nodes to send and ping better than just all of them that are not remote
+    const allExitNodes = await db
+        .select({
+            exitNodeId: exitNodes.exitNodeId,
+            name: exitNodes.name,
+            address: exitNodes.address,
+            endpoint: exitNodes.endpoint,
+            publicKey: exitNodes.publicKey,
+            listenPort: exitNodes.listenPort,
+            relayPort: exitNodes.relayPort,
+            reachableAt: exitNodes.reachableAt,
+            maxConnections: exitNodes.maxConnections,
+            online: exitNodes.online,
+            lastPing: exitNodes.lastPing,
+            type: exitNodes.type,
+            region: exitNodes.region
+        })
+        .from(exitNodes);
+
+    // Filter the nodes. If there are NO remoteExitNodes then do nothing. If there are then remove all of the non-remoteExitNodes
+    if (allExitNodes.length === 0) {
+        logger.warn("No exit nodes found!");
+        return [];
+    }
+
+    return allExitNodes;
+}
+
+export type ExitNodePingResult = {
+    exitNodeId: number;
+    latencyMs: number;
+    weight: number;
+    error?: string;
+    exitNodeName: string;
+    endpoint: string;
+    wasPreviouslyConnected: boolean;
+};
+
+export function selectBestExitNode(
+    pingResults: ExitNodePingResult[]
+): ExitNodePingResult | null {
+    if (!pingResults || pingResults.length === 0) {
+        logger.warn("No ping results provided");
+        return null;
+    }
+
+    return pingResults[0];
+}
+
+export async function checkExitNodeOrg(
+    exitNodeId: number,
+    orgId: string,
+    trx?: Transaction | typeof db
+): Promise<boolean> {
+    return false;
+}
+
+export async function resolveExitNodes(
+    hostname: string,
+    publicKey: string
+): Promise<
+    {
+        endpoint: string;
+        publicKey: string;
+        orgId: string;
+    }[]
+> {
+    // OSS version: simple implementation that returns empty array
+    return [];
+}

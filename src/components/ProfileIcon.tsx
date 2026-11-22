@@ -1,0 +1,222 @@
+"use client";
+
+import { createApiClient } from "@app/lib/api";
+import { Avatar, AvatarFallback } from "@app/components/ui/avatar";
+import { Button } from "@app/components/ui/button";
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuLabel,
+    DropdownMenuSeparator,
+    DropdownMenuSub,
+    DropdownMenuSubContent,
+    DropdownMenuSubTrigger,
+    DropdownMenuTrigger
+} from "@app/components/ui/dropdown-menu";
+import { useEnvContext } from "@app/hooks/useEnvContext";
+import { toast } from "@app/hooks/useToast";
+import { formatAxiosError } from "@app/lib/api";
+import { getUserDisplayName } from "@app/lib/getUserDisplayName";
+import { Check, Laptop, Moon, Sun, Trash2 } from "lucide-react";
+import { useTheme } from "next-themes";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { useState } from "react";
+import { useUserContext } from "@app/hooks/useUserContext";
+import Disable2FaForm from "./Disable2FaForm";
+import SecurityKeyForm from "./SecurityKeyForm";
+import Enable2FaDialog from "./Enable2FaDialog";
+import ChangePasswordDialog from "./ChangePasswordDialog";
+import ViewDevicesDialog from "./ViewDevicesDialog";
+import { UserType } from "@server/types/UserTypes";
+import LocaleSwitcher from "@app/components/LocaleSwitcher";
+import { useTranslations } from "next-intl";
+
+export default function ProfileIcon() {
+    const { setTheme, theme } = useTheme();
+    const { env } = useEnvContext();
+    const api = createApiClient({ env });
+    const { user, updateUser } = useUserContext();
+    const router = useRouter();
+
+    const [userTheme, setUserTheme] = useState<"light" | "dark" | "system">(
+        theme as "light" | "dark" | "system"
+    );
+
+    const [openEnable2fa, setOpenEnable2fa] = useState(false);
+    const [openDisable2fa, setOpenDisable2fa] = useState(false);
+    const [openSecurityKey, setOpenSecurityKey] = useState(false);
+    const [openChangePassword, setOpenChangePassword] = useState(false);
+    const [openViewDevices, setOpenViewDevices] = useState(false);
+
+    const t = useTranslations();
+
+    function getInitials() {
+        const displayName = getUserDisplayName({ user });
+        return displayName.substring(0, 1).toUpperCase();
+    }
+
+    function handleThemeChange(theme: "light" | "dark" | "system") {
+        setUserTheme(theme);
+        setTheme(theme);
+    }
+
+    function logout() {
+        api.post("/auth/logout")
+            .catch((e) => {
+                console.error(t("logoutError"), e);
+                toast({
+                    title: t("logoutError"),
+                    description: formatAxiosError(e, t("logoutError"))
+                });
+            })
+            .then(() => {
+                router.push("/auth/login");
+                router.refresh();
+            });
+    }
+
+    return (
+        <>
+            <Enable2FaDialog open={openEnable2fa} setOpen={setOpenEnable2fa} />
+            <Disable2FaForm open={openDisable2fa} setOpen={setOpenDisable2fa} />
+            <SecurityKeyForm
+                open={openSecurityKey}
+                setOpen={setOpenSecurityKey}
+            />
+            <ChangePasswordDialog
+                open={openChangePassword}
+                setOpen={setOpenChangePassword}
+            />
+            <ViewDevicesDialog
+                open={openViewDevices}
+                setOpen={setOpenViewDevices}
+            />
+
+            <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                    <Button
+                        variant="outline"
+                        className="relative h-10 w-10 rounded-full"
+                    >
+                        <Avatar className="h-9 w-9">
+                            <AvatarFallback>{getInitials()}</AvatarFallback>
+                        </Avatar>
+                    </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="w-56" align="start" forceMount>
+                    <DropdownMenuLabel className="font-normal">
+                        <div className="flex flex-col space-y-1">
+                            <p className="text-sm font-medium leading-none">
+                                {t("signingAs")}
+                            </p>
+                            <p className="text-xs leading-none text-muted-foreground">
+                                {getUserDisplayName({ user })}
+                            </p>
+                        </div>
+                        {user.serverAdmin ? (
+                            <p className="text-xs leading-none text-muted-foreground mt-2">
+                                {t("serverAdmin")}
+                            </p>
+                        ) : (
+                            <p className="text-xs leading-none text-muted-foreground mt-2">
+                                {user.idpName || t("idpNameInternal")}
+                            </p>
+                        )}
+                    </DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    {user?.type === UserType.Internal && (
+                        <>
+                            {!user.twoFactorEnabled && (
+                                <DropdownMenuItem
+                                    onClick={() => setOpenEnable2fa(true)}
+                                >
+                                    <span>{t("otpEnable")}</span>
+                                </DropdownMenuItem>
+                            )}
+                            {user.twoFactorEnabled && (
+                                <DropdownMenuItem
+                                    onClick={() => setOpenDisable2fa(true)}
+                                >
+                                    <span>{t("otpDisable")}</span>
+                                </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem
+                                onClick={() => setOpenSecurityKey(true)}
+                            >
+                                <span>{t("securityKeyManage")}</span>
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                                onClick={() => setOpenChangePassword(true)}
+                            >
+                                <span>{t("changePassword")}</span>
+                            </DropdownMenuItem>
+                        </>
+                    )}
+                    <DropdownMenuItem onClick={() => setOpenViewDevices(true)}>
+                        <span>{t("viewDevices") || "View Devices"}</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>{t("theme")}</DropdownMenuLabel>
+                    <DropdownMenuSub>
+                        <DropdownMenuSubTrigger className="[&_svg:not([class*='text-'])]:text-muted-foreground">
+                            {userTheme === "light" && (
+                                <Sun className="mr-2 h-4 w-4" />
+                            )}
+                            {userTheme === "dark" && (
+                                <Moon className="mr-2 h-4 w-4" />
+                            )}
+                            {userTheme === "system" && (
+                                <Laptop className="mr-2 h-4 w-4" />
+                            )}
+                            <span className="capitalize">{t(userTheme)}</span>
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent className="min-w-[8rem]">
+                            {(["light", "dark", "system"] as const).map(
+                                (themeOption) => (
+                                    <DropdownMenuItem
+                                        key={themeOption}
+                                        onClick={() =>
+                                            handleThemeChange(themeOption)
+                                        }
+                                        className="flex items-center gap-2"
+                                    >
+                                        <span className="capitalize">
+                                            {t(themeOption)}
+                                        </span>
+                                        {userTheme === themeOption && (
+                                            <Check className="ml-auto h-4 w-4" />
+                                        )}
+                                    </DropdownMenuItem>
+                                )
+                            )}
+                        </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>{t("language")}</DropdownMenuLabel>
+                    <LocaleSwitcher />
+                    <DropdownMenuSeparator />
+                    {user?.type === UserType.Internal && !user?.serverAdmin && (
+                        <>
+                            <DropdownMenuItem asChild>
+                                <Link
+                                    href="/auth/delete-account"
+                                    className="flex cursor-pointer items-center"
+                                >
+                                    <Trash2 className="mr-2 h-4 w-4" />
+                                    <span>{t("deleteAccount")}</span>
+                                </Link>
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                        </>
+                    )}
+                    <DropdownMenuItem onClick={() => logout()}>
+                        {/* <LogOut className="mr-2 h-4 w-4" /> */}
+                        <span>{t("logout")}</span>
+                    </DropdownMenuItem>
+                </DropdownMenuContent>
+            </DropdownMenu>
+        </>
+    );
+}

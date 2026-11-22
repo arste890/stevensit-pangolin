@@ -1,0 +1,63 @@
+import { db, ExitNode, exitNodes } from "@server/db";
+import { getUniqueExitNodeEndpointName } from "@server/db/names";
+import config from "@server/lib/config";
+import { getNextAvailableSubnet } from "@server/lib/exitNodes";
+import logger from "@server/logger";
+import { eq } from "drizzle-orm";
+
+export async function createExitNode(
+    publicKey: string,
+    reachableAt: string | undefined
+) {
+    // Fetch exit node
+    const [exitNodeQuery] = await db.select().from(exitNodes).limit(1);
+    let exitNode: ExitNode;
+    if (!exitNodeQuery) {
+        const { value: address, release } = await getNextAvailableSubnet();
+        try {
+            const listenPort = config.getRawConfig().gerbil.start_port;
+            const relayPort = config.getRawConfig().gerbil.clients_start_port;
+
+            const exitNodeName =
+                config.getRawConfig().gerbil.exit_node_name ||
+                `Exit Node ${publicKey.slice(0, 8)}`;
+
+            // create a new exit node
+            [exitNode] = await db
+                .insert(exitNodes)
+                .values({
+                    publicKey,
+                    endpoint: config.getRawConfig().gerbil.base_endpoint,
+                    address,
+                    online: true,
+                    listenPort,
+                    relayPort,
+                    reachableAt,
+                    name: exitNodeName
+                })
+                .returning()
+                .execute();
+
+            logger.info(
+                `Created new exit node ${exitNode.name} with address ${exitNode.address} and port ${exitNode.listenPort}`
+            );
+        } finally {
+            await release();
+        }
+    } else {
+        // update the existing exit node
+        [exitNode] = await db
+            .update(exitNodes)
+            .set({
+                reachableAt,
+                publicKey,
+                online: true
+            })
+            .where(eq(exitNodes.publicKey, publicKey))
+            .returning();
+
+        logger.info(`Updated exit node with reachableAt to ${reachableAt}`);
+    }
+
+    return exitNode;
+}

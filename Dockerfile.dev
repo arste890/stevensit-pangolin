@@ -1,0 +1,18 @@
+# Mirror of docker.io/library/node, kept in sync by
+# .github/workflows/mirror-node.yml
+FROM ghcr.io/fosrl/node:24.22.3-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache python3 make g++
+
+COPY package*.json .npmrc ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Use tsx watch for development with hot reload
+CMD ["npm", "run", "dev"]

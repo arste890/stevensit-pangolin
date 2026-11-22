@@ -1,0 +1,2500 @@
+import { Router } from "express";
+import config from "@server/lib/config";
+import * as site from "./site";
+import * as org from "./org";
+import * as resource from "./resource";
+import * as policy from "./policy";
+import * as domain from "./domain";
+import * as target from "./target";
+import * as user from "./user";
+import * as auth from "./auth";
+import * as role from "./role";
+import * as client from "./client";
+import * as siteResource from "./siteResource";
+import * as supporterKey from "./supporterKey";
+import * as accessToken from "./accessToken";
+import * as idp from "./idp";
+import * as blueprints from "./blueprints";
+import * as apiKeys from "./apiKeys";
+import * as logs from "./auditLogs";
+import * as launcher from "./launcher";
+import * as newt from "./newt";
+import * as olm from "./olm";
+import * as ssh from "./ssh";
+import * as serverInfo from "./serverInfo";
+import * as reKey from "./re-key";
+import HttpCode from "@server/types/HttpCode";
+import {
+    verifyAccessTokenAccess,
+    verifySessionMiddleware,
+    verifySessionUserMiddleware,
+    verifyOrgAccess,
+    verifySiteAccess,
+    verifyResourceAccess,
+    verifyTargetAccess,
+    verifyRoleAccess,
+    verifySetResourceUsers,
+    verifySetResourceClients,
+    verifyUserAccess,
+    getUserOrgs,
+    verifyUserIsServerAdmin,
+    verifyIsLoggedInUser,
+    verifyClientAccess,
+    verifyApiKeyAccess,
+    verifyDomainAccess,
+    verifyUserHasAction,
+    verifyUserIsOrgOwner,
+    verifySiteResourceAccess,
+    verifyOlmAccess,
+    verifyLimits,
+    verifyResourcePolicyAccess,
+    verifyAiProviderAccess,
+    verifyAiModelAccess,
+    verifyAiBudgetAccess,
+    verifyVirtualApiKeyAccess,
+    logActionAudit,
+    verifyCertificateAccess
+} from "@server/middlewares";
+import { ActionsEnum } from "@server/auth/actions";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
+import createHttpError from "http-errors";
+import { build } from "@server/build";
+import { createStore } from "#dynamic/lib/rateLimitStore";
+import { checkRoundTripMessage } from "./ws";
+import * as labels from "@server/routers/labels";
+import * as aiProvider from "@server/routers/aiProvider";
+import * as redirect from "@server/routers/redirect";
+import * as aiBudget from "@server/routers/aiBudget";
+import * as virtualApiKey from "@server/routers/virtualApiKey";
+import * as certificates from "@server/routers/certificates";
+
+function rateLimitIdentityKey(value: unknown): string {
+    return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+// Root routes
+export const unauthenticated = Router();
+
+unauthenticated.get("/", (_, res) => {
+    res.status(HttpCode.OK).json({ message: "Healthy" });
+});
+
+// Authenticated Root routes
+export const authenticated = Router();
+authenticated.use(verifySessionUserMiddleware);
+
+authenticated.get("/pick-org-defaults", org.pickOrgDefaults);
+authenticated.get("/org/checkId", org.checkId);
+
+authenticated.put("/org", getUserOrgs, org.createOrg);
+
+authenticated.get("/orgs", verifyUserIsServerAdmin, org.listOrgs);
+authenticated.get("/admin/orgs", verifyUserIsServerAdmin, org.adminListOrgs);
+authenticated.delete(
+    "/admin/org/:orgId",
+    verifyUserIsServerAdmin,
+    org.adminDeleteOrg
+);
+authenticated.get("/user/:userId/orgs", verifyIsLoggedInUser, org.listUserOrgs);
+
+authenticated.get(
+    "/org/:orgId",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.getOrg),
+    org.getOrg
+);
+authenticated.post(
+    "/org/:orgId",
+    verifyOrgAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.updateOrg),
+    logActionAudit(ActionsEnum.updateOrg),
+    org.updateOrg
+);
+
+authenticated.delete(
+    "/org/:orgId",
+    verifyOrgAccess,
+    verifyUserIsOrgOwner,
+    verifyUserHasAction(ActionsEnum.deleteOrg),
+    logActionAudit(ActionsEnum.deleteOrg),
+    org.deleteOrg
+);
+
+authenticated.put(
+    "/org/:orgId/site",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.createSite),
+    logActionAudit(ActionsEnum.createSite),
+    site.createSite
+);
+
+authenticated.get(
+    "/org/:orgId/sites",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listSites),
+    site.listSites
+);
+authenticated.get(
+    "/org/:orgId/site/:niceId",
+    verifyOrgAccess,
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.getSite),
+    site.getSite
+);
+
+authenticated.get(
+    "/org/:orgId/pick-site-defaults",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.createSite),
+    site.pickSiteDefaults
+);
+authenticated.get(
+    "/site/:siteId",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.getSite),
+    site.getSite
+);
+
+authenticated.get(
+    "/org/:orgId/pick-client-defaults",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.createClient),
+    client.pickClientDefaults
+);
+
+authenticated.get(
+    "/org/:orgId/clients",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listClients),
+    client.listClients
+);
+
+authenticated.get(
+    "/org/:orgId/user-devices",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listClients),
+    client.listUserDevices
+);
+
+authenticated.get(
+    "/client/:clientId",
+    verifyClientAccess,
+    verifyUserHasAction(ActionsEnum.getClient),
+    client.getClient
+);
+
+authenticated.get(
+    "/org/:orgId/client/:niceId",
+    verifyOrgAccess,
+    verifyClientAccess,
+    verifyUserHasAction(ActionsEnum.getClient),
+    client.getClient
+);
+
+authenticated.put(
+    "/org/:orgId/client",
+    verifyOrgAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createClient),
+    logActionAudit(ActionsEnum.createClient),
+    client.createClient
+);
+
+// TODO: Separate into a deleteUserClient (for user clients) and deleteClient (for machine clients)
+authenticated.delete(
+    "/client/:clientId",
+    verifyClientAccess,
+    verifyUserHasAction(ActionsEnum.deleteClient),
+    logActionAudit(ActionsEnum.deleteClient),
+    client.deleteClient
+);
+
+authenticated.post(
+    "/client/:clientId/archive",
+    verifyClientAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.archiveClient),
+    logActionAudit(ActionsEnum.archiveClient),
+    client.archiveClient
+);
+
+authenticated.post(
+    "/client/:clientId/unarchive",
+    verifyClientAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.unarchiveClient),
+    logActionAudit(ActionsEnum.unarchiveClient),
+    client.unarchiveClient
+);
+
+authenticated.post(
+    "/client/:clientId/block",
+    verifyClientAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.blockClient),
+    logActionAudit(ActionsEnum.blockClient),
+    client.blockClient
+);
+
+authenticated.post(
+    "/client/:clientId/unblock",
+    verifyClientAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.unblockClient),
+    logActionAudit(ActionsEnum.unblockClient),
+    client.unblockClient
+);
+
+authenticated.post(
+    "/client/:clientId",
+    verifyClientAccess, // this will check if the user has access to the client
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.updateClient), // this will check if the user has permission to update the client
+    logActionAudit(ActionsEnum.updateClient),
+    client.updateClient
+);
+
+// authenticated.get(
+//     "/site/:siteId/roles",
+//     verifySiteAccess,
+//     verifyUserHasAction(ActionsEnum.listSiteRoles),
+//     site.listSiteRoles
+// );
+authenticated.post(
+    "/site/:siteId",
+    verifySiteAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.updateSite),
+    logActionAudit(ActionsEnum.updateSite),
+    site.updateSite
+);
+
+authenticated.post(
+    "/site/:siteId/approve",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.updateSiteApprovals),
+    logActionAudit(ActionsEnum.updateSiteApprovals),
+    site.approveSite
+);
+
+authenticated.post(
+    "/site/:siteId/reject",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.updateSiteApprovals),
+    logActionAudit(ActionsEnum.updateSiteApprovals),
+    site.rejectSite
+);
+
+authenticated.delete(
+    "/site/:siteId",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.deleteSite),
+    logActionAudit(ActionsEnum.deleteSite),
+    site.deleteSite
+);
+
+authenticated.post(
+    "/site/:siteId/restart",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.restartSite),
+    logActionAudit(ActionsEnum.restartSite),
+    site.restartSite
+);
+
+// TODO: BREAK OUT THESE ACTIONS SO THEY ARE NOT ALL "getSite"
+authenticated.get(
+    "/site/:siteId/docker/status",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.getSite),
+    site.dockerStatus
+);
+authenticated.get(
+    "/site/:siteId/docker/online",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.getSite),
+    site.dockerOnline
+);
+authenticated.post(
+    "/site/:siteId/docker/check",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.getSite),
+    site.checkDockerSocket
+);
+authenticated.post(
+    "/site/:siteId/docker/trigger",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.getSite),
+    site.triggerFetchContainers
+);
+authenticated.get(
+    "/site/:siteId/docker/containers",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.getSite),
+    site.listContainers
+);
+
+authenticated.get(
+    "/site/:siteId/status-history",
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.getSite),
+    site.getSiteStatusHistory
+);
+
+authenticated.get(
+    "/org/:orgId/site-status-histories",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listSites),
+    site.getBatchedSiteStatusHistory
+);
+
+// Site Resource endpoints
+authenticated.put(
+    "/org/:orgId/site-resource",
+    verifyOrgAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createSiteResource),
+    logActionAudit(ActionsEnum.createSiteResource),
+    siteResource.createSiteResource
+);
+
+authenticated.get(
+    "/org/:orgId/site/:siteId/resources",
+    verifyOrgAccess,
+    verifySiteAccess,
+    verifyUserHasAction(ActionsEnum.listSiteResources),
+    siteResource.listSiteResources
+);
+
+authenticated.get(
+    "/org/:orgId/site-resources",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listSiteResources),
+    siteResource.listAllSiteResourcesByOrg
+);
+
+authenticated.get(
+    "/org/:orgId/site-resource/:siteResourceId",
+    verifyOrgAccess,
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.getSiteResource),
+    siteResource.getSiteResource
+);
+
+authenticated.get(
+    "/site-resource/:siteResourceId",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.getSiteResource),
+    siteResource.getSiteResource
+);
+
+authenticated.get(
+    "/site-resource/:siteResourceId/blueprint",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.getSiteResource),
+    siteResource.exportSiteResourceBlueprint
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId",
+    verifySiteResourceAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.updateSiteResource),
+    logActionAudit(ActionsEnum.updateSiteResource),
+    siteResource.updateSiteResource
+);
+
+authenticated.delete(
+    "/site-resource/:siteResourceId",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.deleteSiteResource),
+    logActionAudit(ActionsEnum.deleteSiteResource),
+    siteResource.deleteSiteResource
+);
+
+authenticated.get(
+    "/site-resource/:siteResourceId/roles",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceRoles),
+    siteResource.listSiteResourceRoles
+);
+
+authenticated.get(
+    "/site-resource/:siteResourceId/users",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceUsers),
+    siteResource.listSiteResourceUsers
+);
+
+authenticated.get(
+    "/site-resource/:siteResourceId/clients",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceUsers),
+    siteResource.listSiteResourceClients
+);
+
+authenticated.get(
+    "/site-resource/:siteResourceId/ai-models",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceAiModels),
+    siteResource.listSiteResourceAiModels
+);
+
+authenticated.get(
+    "/site-resource/:siteResourceId/ai-providers",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceAiModels),
+    siteResource.listSiteResourceAiProviders
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/roles",
+    verifySiteResourceAccess,
+    verifyRoleAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourceRoles),
+    logActionAudit(ActionsEnum.setResourceRoles),
+    siteResource.setSiteResourceRoles
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/ai-models",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    siteResource.setSiteResourceAiModels
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/ai-models/add",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    siteResource.addAiModelToSiteResource
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/ai-models/remove",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    siteResource.removeAiModelFromSiteResource
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/ai-providers",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    siteResource.setSiteResourceAiProviders
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/ai-providers/add",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    siteResource.addAiProviderToSiteResource
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/ai-providers/remove",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    siteResource.removeAiProviderFromSiteResource
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/users",
+    verifySiteResourceAccess,
+    verifySetResourceUsers,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourceUsers),
+    logActionAudit(ActionsEnum.setResourceUsers),
+    siteResource.setSiteResourceUsers
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/clients",
+    verifySiteResourceAccess,
+    verifySetResourceClients,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourceUsers),
+    logActionAudit(ActionsEnum.setResourceUsers),
+    siteResource.setSiteResourceClients
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/clients/add",
+    verifySiteResourceAccess,
+    verifySetResourceClients,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourceUsers),
+    logActionAudit(ActionsEnum.setResourceUsers),
+    siteResource.addClientToSiteResource
+);
+
+authenticated.post(
+    "/site-resource/:siteResourceId/clients/remove",
+    verifySiteResourceAccess,
+    verifySetResourceClients,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourceUsers),
+    logActionAudit(ActionsEnum.setResourceUsers),
+    siteResource.removeClientFromSiteResource
+);
+
+authenticated.put(
+    "/org/:orgId/resource",
+    verifyOrgAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createResource),
+    logActionAudit(ActionsEnum.createResource),
+    resource.createResource
+);
+
+authenticated.get(
+    "/site/:siteId/resources",
+    verifyUserHasAction(ActionsEnum.listResources),
+    resource.listResources
+);
+
+authenticated.get(
+    "/resource/:resourceId/status-history",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.getResource),
+    resource.getResourceStatusHistory
+);
+
+authenticated.get(
+    "/org/:orgId/resource-status-histories",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listResources),
+    resource.getBatchedResourceStatusHistory
+);
+
+authenticated.get(
+    "/org/:orgId/resources",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listResources),
+    resource.listResources
+);
+
+authenticated.get(
+    "/org/:orgId/resource-names",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listResources),
+    resource.listAllResourceNames
+);
+
+authenticated.get(
+    "/org/:orgId/user-resources",
+    verifyOrgAccess,
+    resource.getUserResources
+);
+
+authenticated.get(
+    "/org/:orgId/launcher/groups",
+    verifyOrgAccess,
+    launcher.listLauncherGroups
+);
+
+authenticated.get(
+    "/org/:orgId/launcher/scale",
+    verifyOrgAccess,
+    launcher.listLauncherScale
+);
+
+authenticated.get(
+    "/org/:orgId/launcher/resources",
+    verifyOrgAccess,
+    launcher.listLauncherResources
+);
+
+authenticated.get(
+    "/org/:orgId/launcher/resource/:resourceId/ai-models",
+    verifyOrgAccess,
+    verifyResourceAccess,
+    launcher.listLauncherPublicAiModels
+);
+
+authenticated.get(
+    "/org/:orgId/launcher/site-resource/:siteResourceId/ai-models",
+    verifyOrgAccess,
+    verifySiteResourceAccess,
+    launcher.listLauncherSiteAiModels
+);
+
+authenticated.get(
+    "/org/:orgId/launcher/sites",
+    verifyOrgAccess,
+    launcher.listLauncherSites
+);
+
+authenticated.get(
+    "/org/:orgId/launcher/labels",
+    verifyOrgAccess,
+    launcher.listLauncherLabels
+);
+
+authenticated.get(
+    "/org/:orgId/launcher/views",
+    verifyOrgAccess,
+    launcher.listLauncherViews
+);
+
+authenticated.post(
+    "/org/:orgId/launcher/invalidate-cache",
+    verifyOrgAccess,
+    launcher.invalidateLauncherCache
+);
+
+authenticated.post(
+    "/org/:orgId/launcher/views",
+    verifyOrgAccess,
+    launcher.createLauncherView
+);
+
+authenticated.put(
+    "/org/:orgId/launcher/views/:viewId",
+    verifyOrgAccess,
+    launcher.updateLauncherView
+);
+
+authenticated.put(
+    "/org/:orgId/launcher/default-view",
+    verifyOrgAccess,
+    launcher.upsertLauncherDefaultView
+);
+
+authenticated.delete(
+    "/org/:orgId/launcher/default-view",
+    verifyOrgAccess,
+    launcher.deleteLauncherDefaultView
+);
+
+authenticated.delete(
+    "/org/:orgId/launcher/views/:viewId",
+    verifyOrgAccess,
+    launcher.deleteLauncherView
+);
+
+authenticated.get(
+    "/org/:orgId/user-resource-aliases",
+    verifyOrgAccess,
+    resource.listUserResourceAliases
+);
+
+authenticated.get(
+    "/org/:orgId/domains",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listOrgDomains),
+    domain.listDomains
+);
+
+authenticated.get(
+    "/org/:orgId/domain/:domainId",
+    verifyOrgAccess,
+    verifyDomainAccess,
+    verifyUserHasAction(ActionsEnum.getDomain),
+    domain.getDomain
+);
+
+authenticated.patch(
+    "/org/:orgId/domain/:domainId",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.updateOrgDomain),
+    domain.updateOrgDomain
+);
+
+authenticated.get(
+    "/org/:orgId/domain/:domainId/dns-records",
+    verifyOrgAccess,
+    verifyDomainAccess,
+    verifyUserHasAction(ActionsEnum.getDNSRecords),
+    domain.getDNSRecords
+);
+
+authenticated.get(
+    "/org/:orgId/invitations",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listInvitations),
+    user.listInvitations
+);
+
+authenticated.delete(
+    "/org/:orgId/invitations/:inviteId",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.removeInvitation),
+    logActionAudit(ActionsEnum.removeInvitation),
+    user.removeInvitation
+);
+
+authenticated.post(
+    "/org/:orgId/create-invite",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.inviteUser),
+    logActionAudit(ActionsEnum.inviteUser),
+    user.inviteUser
+); // maybe make this /invite/create instead
+
+unauthenticated.post("/invite/accept", user.acceptInvite); // this is supposed to be unauthenticated
+
+authenticated.get(
+    "/resource/:resourceId/roles",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceRoles),
+    resource.listResourceRoles
+);
+
+authenticated.get(
+    "/resource/:resourceId/users",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceUsers),
+    resource.listResourceUsers
+);
+
+authenticated.get(
+    "/resource/:resourceId/ai-models",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceAiModels),
+    resource.listResourceAiModels
+);
+
+authenticated.get(
+    "/resource/:resourceId/ai-providers",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceAiModels),
+    resource.listResourceAiProviders
+);
+
+authenticated.get(
+    "/resource/:resourceId",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.getResource),
+    resource.getResource
+);
+
+authenticated.get(
+    "/resource/:resourceId/blueprint",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.getResource),
+    resource.exportResourceBlueprint
+);
+authenticated.get(
+    "/org/:orgId/resource/:niceId",
+    verifyOrgAccess,
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.getResource),
+    resource.getResource
+);
+
+authenticated.post(
+    "/resource/:resourceId",
+    verifyResourceAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.updateResource),
+    logActionAudit(ActionsEnum.updateResource),
+    resource.updateResource
+);
+authenticated.delete(
+    "/resource/:resourceId",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.deleteResource),
+    logActionAudit(ActionsEnum.deleteResource),
+    resource.deleteResource
+);
+
+authenticated.put(
+    "/resource/:resourceId/target",
+    verifyResourceAccess,
+    verifySiteAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createTarget),
+    logActionAudit(ActionsEnum.createTarget),
+    target.createTarget
+);
+authenticated.get(
+    "/resource/:resourceId/targets",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.listTargets),
+    target.listTargets
+);
+
+authenticated.put(
+    "/resource/:resourceId/rule",
+    verifyResourceAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createResourceRule),
+    logActionAudit(ActionsEnum.createResourceRule),
+    resource.createResourceRule
+);
+authenticated.get(
+    "/resource/:resourceId/rules",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceRules),
+    resource.listResourceRules
+);
+authenticated.post(
+    "/resource/:resourceId/rule/:ruleId",
+    verifyResourceAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.updateResourceRule),
+    logActionAudit(ActionsEnum.updateResourceRule),
+    resource.updateResourceRule
+);
+authenticated.delete(
+    "/resource/:resourceId/rule/:ruleId",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.deleteResourceRule),
+    logActionAudit(ActionsEnum.deleteResourceRule),
+    resource.deleteResourceRule
+);
+
+authenticated.get(
+    "/target/:targetId",
+    verifyTargetAccess,
+    verifyUserHasAction(ActionsEnum.getTarget),
+    target.getTarget
+);
+authenticated.post(
+    "/target/:targetId",
+    verifyTargetAccess,
+    verifySiteAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.updateTarget),
+    logActionAudit(ActionsEnum.updateTarget),
+    target.updateTarget
+);
+authenticated.delete(
+    "/target/:targetId",
+    verifyTargetAccess,
+    verifyUserHasAction(ActionsEnum.deleteTarget),
+    logActionAudit(ActionsEnum.deleteTarget),
+    target.deleteTarget
+);
+
+authenticated.put(
+    "/org/:orgId/role",
+    verifyOrgAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createRole),
+    logActionAudit(ActionsEnum.createRole),
+    role.createRole
+);
+authenticated.get(
+    "/org/:orgId/roles",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listRoles),
+    role.listRoles
+);
+
+authenticated.get(
+    "/org/:orgId/my-client-settings",
+    verifyOrgAccess,
+    role.getMyClientSettings
+);
+
+authenticated.post(
+    "/role/:roleId",
+    verifyRoleAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.updateRole),
+    logActionAudit(ActionsEnum.updateRole),
+    role.updateRole
+);
+
+authenticated.get(
+    "/org/:orgId/resource-policy/:niceId",
+    verifyOrgAccess,
+    verifyResourcePolicyAccess,
+    verifyUserHasAction(ActionsEnum.getResourcePolicy),
+    policy.getResourcePolicy
+);
+
+authenticated.get(
+    "/resource/:resourceId/policies",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.getResourcePolicy),
+    resource.getResourcePolicies
+);
+
+authenticated.get(
+    "/resource-policy/:resourcePolicyId",
+    verifyResourcePolicyAccess,
+    verifyUserHasAction(ActionsEnum.getResourcePolicy),
+    policy.getResourcePolicy
+);
+
+authenticated.put(
+    "/resource-policy/:resourcePolicyId",
+    verifyResourcePolicyAccess,
+    verifyUserHasAction(ActionsEnum.updateResourcePolicy),
+    policy.updateResourcePolicy
+);
+
+authenticated.get(
+    "/role/:roleId",
+    verifyRoleAccess,
+    verifyUserHasAction(ActionsEnum.getRole),
+    role.getRole
+);
+// authenticated.post(
+//     "/role/:roleId",
+//     verifyRoleAccess,
+//     verifyUserHasAction(ActionsEnum.updateRole),
+//     role.updateRole
+// );
+authenticated.delete(
+    "/role/:roleId",
+    verifyRoleAccess,
+    verifyUserHasAction(ActionsEnum.deleteRole),
+    logActionAudit(ActionsEnum.deleteRole),
+    role.deleteRole
+);
+
+authenticated.post(
+    "/role/:roleId/add/:userId",
+    verifyRoleAccess,
+    verifyUserAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.addUserRole),
+    logActionAudit(ActionsEnum.addUserRole),
+    user.addUserRoleLegacy
+);
+
+authenticated.post(
+    "/resource/:resourceId/roles",
+    verifyResourceAccess,
+    verifyRoleAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourceRoles),
+    logActionAudit(ActionsEnum.setResourceRoles),
+    resource.setResourceRoles
+);
+
+authenticated.post(
+    "/resource/:resourceId/users",
+    verifyResourceAccess,
+    verifySetResourceUsers,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourceUsers),
+    logActionAudit(ActionsEnum.setResourceUsers),
+    resource.setResourceUsers
+);
+
+authenticated.post(
+    "/resource/:resourceId/ai-models",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    resource.setResourceAiModels
+);
+
+authenticated.post(
+    "/resource/:resourceId/ai-models/add",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    resource.addAiModelToResource
+);
+
+authenticated.post(
+    "/resource/:resourceId/ai-models/remove",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    resource.removeAiModelFromResource
+);
+
+authenticated.post(
+    "/resource/:resourceId/ai-providers",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    resource.setResourceAiProviders
+);
+
+authenticated.post(
+    "/resource/:resourceId/ai-providers/add",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    resource.addAiProviderToResource
+);
+
+authenticated.post(
+    "/resource/:resourceId/ai-providers/remove",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.setResourceAiModels),
+    logActionAudit(ActionsEnum.setResourceAiModels),
+    resource.removeAiProviderFromResource
+);
+
+authenticated.put(
+    "/resource-policy/:resourcePolicyId/access-control",
+    verifyResourcePolicyAccess,
+    verifyUserHasAction(ActionsEnum.setResourcePolicyUsers),
+    logActionAudit(ActionsEnum.setResourcePolicyUsers),
+    policy.setResourcePolicyAccessControl
+);
+
+authenticated.put(
+    "/resource-policy/:resourcePolicyId/password",
+    verifyResourcePolicyAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourcePolicyPassword),
+    logActionAudit(ActionsEnum.setResourcePolicyPassword),
+    policy.setResourcePolicyPassword
+);
+
+authenticated.put(
+    "/resource-policy/:resourcePolicyId/pincode",
+    verifyResourcePolicyAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourcePolicyPincode),
+    logActionAudit(ActionsEnum.setResourcePolicyPincode),
+    policy.setResourcePolicyPincode
+);
+
+authenticated.put(
+    "/resource-policy/:resourcePolicyId/header-auth",
+    verifyResourcePolicyAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourcePolicyHeaderAuth),
+    logActionAudit(ActionsEnum.setResourcePolicyHeaderAuth),
+    policy.setResourcePolicyHeaderAuth
+);
+
+authenticated.put(
+    "/resource-policy/:resourcePolicyId/whitelist",
+    verifyResourcePolicyAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourcePolicyWhitelist),
+    logActionAudit(ActionsEnum.setResourcePolicyWhitelist),
+    policy.setResourcePolicyWhitelist
+);
+
+authenticated.put(
+    "/resource-policy/:resourcePolicyId/rules",
+    verifyResourcePolicyAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourcePolicyRules),
+    logActionAudit(ActionsEnum.setResourcePolicyRules),
+    policy.setResourcePolicyRules
+);
+
+authenticated.put(
+    "/resource-policy/:resourcePolicyId/mtls/certificate",
+    verifyResourcePolicyAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.updateResourcePolicy),
+    logActionAudit(ActionsEnum.updateResourcePolicy),
+    policy.createResourcePolicyMtlsCertificate
+);
+authenticated.get(
+    "/resource-policy/:resourcePolicyId/mtls/certificates",
+    verifyResourcePolicyAccess,
+    verifyUserHasAction(ActionsEnum.getResourcePolicy),
+    policy.listResourcePolicyMtlsCertificates
+);
+authenticated.delete(
+    "/resource-policy/:resourcePolicyId/mtls/certificate/:mtlsCertificateId",
+    verifyResourcePolicyAccess,
+    verifyUserHasAction(ActionsEnum.updateResourcePolicy),
+    logActionAudit(ActionsEnum.updateResourcePolicy),
+    policy.deleteResourcePolicyMtlsCertificate
+);
+
+authenticated.post(
+    `/resource/:resourceId/password`,
+    verifyResourceAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourcePassword),
+    logActionAudit(ActionsEnum.setResourcePassword),
+    resource.setResourcePassword
+);
+
+authenticated.post(
+    `/resource/:resourceId/pincode`,
+    verifyResourceAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourcePincode),
+    logActionAudit(ActionsEnum.setResourcePincode),
+    resource.setResourcePincode
+);
+
+authenticated.post(
+    `/resource/:resourceId/header-auth`,
+    verifyResourceAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourceHeaderAuth),
+    logActionAudit(ActionsEnum.setResourceHeaderAuth),
+    resource.setResourceHeaderAuth
+);
+
+authenticated.post(
+    `/resource/:resourceId/whitelist`,
+    verifyResourceAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setResourceWhitelist),
+    logActionAudit(ActionsEnum.setResourceWhitelist),
+    resource.setResourceWhitelist
+);
+
+authenticated.get(
+    `/resource/:resourceId/whitelist`,
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.getResourceWhitelist),
+    resource.getResourceWhitelist
+);
+
+authenticated.post(
+    `/resource/:resourceId/access-token`,
+    verifyResourceAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.generateAccessToken),
+    logActionAudit(ActionsEnum.generateAccessToken),
+    accessToken.generateAccessToken
+);
+
+authenticated.delete(
+    `/access-token/:accessTokenId`,
+    verifyAccessTokenAccess,
+    verifyUserHasAction(ActionsEnum.deleteAcessToken),
+    logActionAudit(ActionsEnum.deleteAcessToken),
+    accessToken.deleteAccessToken
+);
+
+authenticated.get(
+    `/org/:orgId/access-tokens`,
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listAccessTokens),
+    accessToken.listAccessTokens
+);
+
+authenticated.get(
+    `/resource/:resourceId/access-tokens`,
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.listAccessTokens),
+    accessToken.listAccessTokens
+);
+
+authenticated.get(`/org/:orgId/overview`, verifyOrgAccess, org.getOrgOverview);
+
+authenticated.get(`/server-info`, serverInfo.getServerInfo);
+
+authenticated.post(
+    `/supporter-key/validate`,
+    supporterKey.validateSupporterKey
+);
+authenticated.post(`/supporter-key/hide`, supporterKey.hideSupporterKey);
+
+unauthenticated.get(
+    "/resource/:resourceGuid/auth",
+    resource.getResourceAuthInfo
+);
+
+// authenticated.get(
+//     "/role/:roleId/resources",
+//     verifyRoleAccess,
+//     verifyUserInRole,
+//     verifyUserHasAction(ActionsEnum.listRoleResources),
+//     role.listRoleResources
+// );
+// authenticated.put(
+//     "/role/:roleId/action",
+//     verifyRoleAccess,
+//     verifyUserInRole,
+//     verifyUserHasAction(ActionsEnum.addRoleAction),
+//     role.addRoleAction
+// );
+// authenticated.delete(
+//     "/role/:roleId/action",
+//     verifyRoleAccess,
+//     verifyUserInRole,
+//     verifyUserHasAction(ActionsEnum.removeRoleAction),
+//     role.removeRoleAction
+// );
+// authenticated.get(
+//     "/role/:roleId/actions",
+//     verifyRoleAccess,
+//     verifyUserInRole,
+//     verifyUserHasAction(ActionsEnum.listRoleActions),
+//     role.listRoleActions
+// );
+
+unauthenticated.get("/user", verifySessionMiddleware, user.getUser);
+unauthenticated.post(
+    "/user/locale",
+    verifySessionMiddleware,
+    user.updateUserLocale
+);
+unauthenticated.get("/my-device", verifySessionMiddleware, user.myDevice);
+
+authenticated.put(
+    "/org/:orgId/user",
+    verifyOrgAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createOrgUser),
+    logActionAudit(ActionsEnum.createOrgUser),
+    user.createOrgUser
+);
+
+authenticated.post(
+    "/org/:orgId/user/:userId",
+    verifyOrgAccess,
+    verifyUserAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.updateOrgUser),
+    logActionAudit(ActionsEnum.updateOrgUser),
+    user.updateOrgUser
+);
+
+authenticated.get("/org/:orgId/user/:userId", verifyOrgAccess, user.getOrgUser);
+authenticated.get("/org/:orgId/user/:userId/check", org.checkOrgUserAccess);
+
+authenticated.get(
+    "/org/:orgId/users",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listUsers),
+    user.listUsers
+);
+authenticated.delete(
+    "/org/:orgId/user/:userId",
+    verifyOrgAccess,
+    verifyUserAccess,
+    verifyUserHasAction(ActionsEnum.removeUser),
+    logActionAudit(ActionsEnum.removeUser),
+    user.removeUserOrg
+);
+
+// authenticated.put(
+//     "/user/:userId/site",
+//     verifySiteAccess,
+//     verifyUserAccess,
+//     verifyUserHasAction(ActionsEnum.addRoleSite),
+//     role.addRoleSite
+// );
+// authenticated.delete(
+//     "/user/:userId/site",
+//     verifySiteAccess,
+//     verifyUserAccess,
+//     verifyUserHasAction(ActionsEnum.removeRoleSite),
+//     role.removeRoleSite
+// );
+// authenticated.put(
+//     "/org/:orgId/user/:userId/action",
+//     verifyOrgAccess,
+//     verifyUserAccess,
+//     verifyUserHasAction(ActionsEnum.addRoleAction),
+//     role.addRoleAction
+// );
+// authenticated.delete(
+//     "/org/:orgId/user/:userId/action",
+//     verifyOrgAccess,
+//     verifyUserAccess,
+//     verifyUserHasAction(ActionsEnum.removeRoleAction),
+//     role.removeRoleAction
+// );
+
+// authenticated.put(
+//     "/newt",
+//     verifyUserHasAction(ActionsEnum.createNewt),
+//     createNewt
+// );
+
+authenticated.put("/user/:userId/olm", verifyIsLoggedInUser, olm.createUserOlm);
+
+authenticated.get("/user/:userId/olms", verifyIsLoggedInUser, olm.listUserOlms);
+
+authenticated.post(
+    "/user/:userId/olm/:olmId/archive",
+    verifyIsLoggedInUser,
+    verifyOlmAccess,
+    verifyLimits,
+    olm.archiveUserOlm
+);
+
+authenticated.post(
+    "/user/:userId/olm/:olmId/unarchive",
+    verifyIsLoggedInUser,
+    verifyOlmAccess,
+    olm.unarchiveUserOlm
+);
+
+authenticated.get(
+    "/user/:userId/olm/:olmId",
+    verifyIsLoggedInUser,
+    verifyOlmAccess,
+    olm.getUserOlm
+);
+
+authenticated.post(
+    "/user/:userId/olm/recover",
+    verifyIsLoggedInUser,
+    olm.recoverOlmWithFingerprint
+);
+
+if (build !== "saas") {
+    authenticated.put(
+        "/idp/oidc",
+        verifyUserIsServerAdmin,
+        // verifyUserHasAction(ActionsEnum.createIdp),
+        idp.createOidcIdp
+    );
+
+    authenticated.post(
+        "/idp/:idpId/oidc",
+        verifyUserIsServerAdmin,
+        idp.updateOidcIdp
+    );
+
+    authenticated.delete("/idp/:idpId", verifyUserIsServerAdmin, idp.deleteIdp);
+
+    authenticated.get("/idp/:idpId", verifyUserIsServerAdmin, idp.getIdp);
+
+    authenticated.put(
+        "/idp/:idpId/org/:orgId",
+        verifyUserIsServerAdmin,
+        idp.createIdpOrgPolicy
+    );
+
+    authenticated.post(
+        "/idp/:idpId/org/:orgId",
+        verifyUserIsServerAdmin,
+        idp.updateIdpOrgPolicy
+    );
+
+    authenticated.delete(
+        "/idp/:idpId/org/:orgId",
+        verifyUserIsServerAdmin,
+        idp.deleteIdpOrgPolicy
+    );
+
+    authenticated.get(
+        "/idp/:idpId/org",
+        verifyUserIsServerAdmin,
+        idp.listIdpOrgPolicies
+    );
+
+    authenticated.get(
+        `/api-key/:apiKeyId`,
+        verifyUserIsServerAdmin,
+        apiKeys.getApiKey
+    );
+
+    authenticated.put(
+        `/api-key`,
+        verifyUserIsServerAdmin,
+        apiKeys.createRootApiKey
+    );
+
+    authenticated.delete(
+        `/api-key/:apiKeyId`,
+        verifyUserIsServerAdmin,
+        apiKeys.deleteApiKey
+    );
+
+    authenticated.get(
+        `/api-keys`,
+        verifyUserIsServerAdmin,
+        apiKeys.listRootApiKeys
+    );
+
+    authenticated.get(
+        `/api-key/:apiKeyId/actions`,
+        verifyUserIsServerAdmin,
+        apiKeys.listApiKeyActions
+    );
+
+    authenticated.post(
+        `/api-key/:apiKeyId/actions`,
+        verifyUserIsServerAdmin,
+        apiKeys.setApiKeyActions
+    );
+
+    authenticated.get("/users", verifyUserIsServerAdmin, user.adminListUsers);
+
+    authenticated.get(
+        "/user/:userId",
+        verifyUserIsServerAdmin,
+        user.adminGetUser
+    );
+
+    authenticated.post(
+        "/user/:userId/generate-password-reset-code",
+        verifyUserIsServerAdmin,
+        user.adminGeneratePasswordResetCode
+    );
+
+    authenticated.post(
+        "/user/:userId/server-admin",
+        verifyUserIsServerAdmin,
+        user.adminSetServerAdmin
+    );
+
+    authenticated.delete(
+        "/user/:userId",
+        verifyUserIsServerAdmin,
+        user.adminRemoveUser
+    );
+
+    authenticated.post(
+        "/user/:userId/2fa",
+        verifyUserIsServerAdmin,
+        user.updateUser2FA
+    );
+}
+
+authenticated.get("/idp", idp.listIdps); // anyone can see this; it's just a list of idp names and ids
+
+authenticated.get(
+    `/org/:orgId/api-keys`,
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listApiKeys),
+    apiKeys.listOrgApiKeys
+);
+
+authenticated.post(
+    `/org/:orgId/api-key/:apiKeyId/actions`,
+    verifyOrgAccess,
+    verifyApiKeyAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.setApiKeyActions),
+    logActionAudit(ActionsEnum.setApiKeyActions),
+    apiKeys.setApiKeyActions
+);
+
+authenticated.get(
+    `/org/:orgId/api-key/:apiKeyId/actions`,
+    verifyOrgAccess,
+    verifyApiKeyAccess,
+    verifyUserHasAction(ActionsEnum.listApiKeyActions),
+    apiKeys.listApiKeyActions
+);
+
+authenticated.put(
+    `/org/:orgId/api-key`,
+    verifyOrgAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createApiKey),
+    logActionAudit(ActionsEnum.createApiKey),
+    apiKeys.createOrgApiKey
+);
+
+authenticated.delete(
+    `/org/:orgId/api-key/:apiKeyId`,
+    verifyOrgAccess,
+    verifyApiKeyAccess,
+    verifyUserHasAction(ActionsEnum.deleteApiKey),
+    logActionAudit(ActionsEnum.deleteApiKey),
+    apiKeys.deleteOrgApiKey
+);
+
+authenticated.get(
+    `/org/:orgId/api-key/:apiKeyId`,
+    verifyOrgAccess,
+    verifyApiKeyAccess,
+    verifyUserHasAction(ActionsEnum.getApiKey),
+    apiKeys.getApiKey
+);
+
+authenticated.put(
+    `/org/:orgId/domain`,
+    verifyOrgAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createOrgDomain),
+    logActionAudit(ActionsEnum.createOrgDomain),
+    domain.createOrgDomain
+);
+
+authenticated.post(
+    `/org/:orgId/domain/:domainId/restart`,
+    verifyOrgAccess,
+    verifyDomainAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.restartOrgDomain),
+    logActionAudit(ActionsEnum.restartOrgDomain),
+    domain.restartOrgDomain
+);
+
+authenticated.delete(
+    `/org/:orgId/domain/:domainId`,
+    verifyOrgAccess,
+    verifyDomainAccess,
+    verifyUserHasAction(ActionsEnum.deleteOrgDomain),
+    logActionAudit(ActionsEnum.deleteOrgDomain),
+    domain.deleteAccountDomain
+);
+
+authenticated.get(
+    "/org/:orgId/logs/request",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.viewLogs),
+    logs.queryRequestAuditLogs
+);
+
+authenticated.get(
+    "/org/:orgId/logs/analytics",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.viewLogs),
+    logs.queryRequestAnalytics
+);
+
+authenticated.get(
+    "/org/:orgId/logs/request/export",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.exportLogs),
+    logActionAudit(ActionsEnum.exportLogs),
+    logs.exportRequestAuditLogs
+);
+
+authenticated.get(
+    "/org/:orgId/logs/ai/usage/filters",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.viewLogs),
+    logs.queryAiUsageFilterOptions
+);
+
+authenticated.get(
+    "/org/:orgId/logs/ai/usage/overview",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.viewLogs),
+    logs.queryAiUsageOverview
+);
+
+authenticated.get(
+    "/org/:orgId/logs/ai/usage/providers",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.viewLogs),
+    logs.queryAiUsageProviders
+);
+
+authenticated.get(
+    "/org/:orgId/logs/ai/usage/resources",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.viewLogs),
+    logs.queryAiUsageResources
+);
+
+authenticated.get(
+    "/org/:orgId/logs/ai/usage/users-roles",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.viewLogs),
+    logs.queryAiUsageUsersRoles
+);
+
+authenticated.get(
+    "/org/:orgId/logs/ai/usage/virtual-api-keys",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.viewLogs),
+    logs.queryAiUsageVirtualApiKeys
+);
+
+authenticated.get(
+    "/org/:orgId/blueprints",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listBlueprints),
+    blueprints.listBlueprints
+);
+
+authenticated.put(
+    "/org/:orgId/blueprint",
+    verifyOrgAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.applyBlueprint),
+    blueprints.applyYAMLBlueprint
+);
+
+authenticated.get(
+    "/org/:orgId/blueprint/:blueprintId",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.getBlueprint),
+    blueprints.getBlueprint
+);
+
+authenticated.get("/ws/round-trip-message/:messageId", checkRoundTripMessage);
+
+authenticated.put(
+    "/org/:orgId/ai-provider",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.createAiProvider),
+    logActionAudit(ActionsEnum.createAiProvider),
+    aiProvider.createAiProvider
+);
+
+authenticated.get(
+    "/org/:orgId/ai-providers",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listAiProviders),
+    aiProvider.listAiProviders
+);
+
+authenticated.get(
+    "/ai-provider/:providerId",
+    verifyAiProviderAccess,
+    verifyUserHasAction(ActionsEnum.getAiProvider),
+    aiProvider.getAiProvider
+);
+authenticated.get(
+    "/org/:orgId/ai-provider/:niceId",
+    verifyOrgAccess,
+    verifyAiProviderAccess,
+    verifyUserHasAction(ActionsEnum.getAiProvider),
+    aiProvider.getAiProvider
+);
+
+authenticated.put(
+    "/ai-provider/:providerId/target",
+    verifyAiProviderAccess,
+    verifySiteAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createTarget),
+    logActionAudit(ActionsEnum.createTarget),
+    target.createTarget
+);
+
+authenticated.get(
+    "/ai-provider/:providerId/targets",
+    verifyAiProviderAccess,
+    verifyUserHasAction(ActionsEnum.listTargets),
+    target.listTargets
+);
+
+authenticated.post(
+    "/ai-provider/:providerId",
+    verifyAiProviderAccess,
+    verifyUserHasAction(ActionsEnum.updateAiProvider),
+    logActionAudit(ActionsEnum.updateAiProvider),
+    aiProvider.updateAiProvider
+);
+
+authenticated.delete(
+    "/ai-provider/:providerId",
+    verifyAiProviderAccess,
+    verifyUserHasAction(ActionsEnum.deleteAiProvider),
+    logActionAudit(ActionsEnum.deleteAiProvider),
+    aiProvider.deleteAiProvider
+);
+
+authenticated.put(
+    "/org/:orgId/redirect",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.createRedirect),
+    logActionAudit(ActionsEnum.createRedirect),
+    redirect.createRedirect
+);
+
+authenticated.get(
+    "/org/:orgId/redirects",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listRedirects),
+    redirect.listRedirects
+);
+
+authenticated.get(
+    "/org/:orgId/redirects/:redirectId",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.getRedirect),
+    redirect.getRedirect
+);
+authenticated.get(
+    "/org/:orgId/redirect/:niceId",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.getRedirect),
+    redirect.getRedirect
+);
+
+authenticated.post(
+    "/org/:orgId/redirects/:redirectId",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.updateRedirect),
+    logActionAudit(ActionsEnum.updateRedirect),
+    redirect.updateRedirect
+);
+
+authenticated.delete(
+    "/org/:orgId/redirects/:redirectId",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.deleteRedirect),
+    logActionAudit(ActionsEnum.deleteRedirect),
+    redirect.deleteRedirect
+);
+
+authenticated.put(
+    "/ai-provider/:providerId/model",
+    verifyAiProviderAccess,
+    verifyUserHasAction(ActionsEnum.createAiModel),
+    logActionAudit(ActionsEnum.createAiModel),
+    aiProvider.createAiModel
+);
+
+authenticated.get(
+    "/ai-provider/:providerId/models",
+    verifyAiProviderAccess,
+    verifyUserHasAction(ActionsEnum.listAiModels),
+    aiProvider.listAiModels
+);
+
+authenticated.get(
+    "/ai-provider/:providerId/catalog-models",
+    verifyAiProviderAccess,
+    verifyUserHasAction(ActionsEnum.listAiModels),
+    aiProvider.listCatalogModels
+);
+
+authenticated.get(
+    "/org/:orgId/ai-catalog-models",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listAiModels),
+    aiProvider.listCatalogModelsByType
+);
+
+authenticated.get(
+    "/ai-model/:modelId",
+    verifyAiModelAccess,
+    verifyUserHasAction(ActionsEnum.getAiModel),
+    aiProvider.getAiModel
+);
+
+authenticated.post(
+    "/ai-model/:modelId",
+    verifyAiModelAccess,
+    verifyUserHasAction(ActionsEnum.updateAiModel),
+    logActionAudit(ActionsEnum.updateAiModel),
+    aiProvider.updateAiModel
+);
+
+authenticated.delete(
+    "/ai-model/:modelId",
+    verifyAiModelAccess,
+    verifyUserHasAction(ActionsEnum.deleteAiModel),
+    logActionAudit(ActionsEnum.deleteAiModel),
+    aiProvider.deleteAiModel
+);
+
+authenticated.put(
+    "/org/:orgId/ai-budget",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.createAiBudget),
+    logActionAudit(ActionsEnum.createAiBudget),
+    aiBudget.createAiBudget
+);
+
+authenticated.get(
+    "/org/:orgId/ai-budgets",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listAiBudgets),
+    aiBudget.listAiBudgets
+);
+
+authenticated.get(
+    "/ai-budget/:budgetId",
+    verifyAiBudgetAccess,
+    verifyUserHasAction(ActionsEnum.getAiBudget),
+    aiBudget.getAiBudget
+);
+
+authenticated.post(
+    "/ai-budget/:budgetId",
+    verifyAiBudgetAccess,
+    verifyUserHasAction(ActionsEnum.updateAiBudget),
+    logActionAudit(ActionsEnum.updateAiBudget),
+    aiBudget.updateAiBudget
+);
+
+authenticated.delete(
+    "/ai-budget/:budgetId",
+    verifyAiBudgetAccess,
+    verifyUserHasAction(ActionsEnum.deleteAiBudget),
+    logActionAudit(ActionsEnum.deleteAiBudget),
+    aiBudget.deleteAiBudget
+);
+
+authenticated.put(
+    "/org/:orgId/virtual-api-key",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.createVirtualApiKey),
+    logActionAudit(ActionsEnum.createVirtualApiKey),
+    virtualApiKey.createVirtualApiKey
+);
+
+authenticated.get(
+    "/org/:orgId/virtual-api-keys",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listVirtualApiKeys),
+    virtualApiKey.listVirtualApiKeys
+);
+
+authenticated.post(
+    "/org/:orgId/virtual-api-keys/email-identity-keys",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.getVirtualApiKey),
+    virtualApiKey.emailIdentityKeysRateLimit,
+    logActionAudit(ActionsEnum.getVirtualApiKey),
+    virtualApiKey.emailIdentityKeys
+);
+
+authenticated.get(
+    "/org/:orgId/my-virtual-api-keys",
+    verifyOrgAccess,
+    virtualApiKey.listMyVirtualApiKeys
+);
+
+authenticated.get(
+    "/org/:orgId/my-virtual-api-keys/:virtualApiKeyId",
+    verifyOrgAccess,
+    virtualApiKey.getMyVirtualApiKey
+);
+
+authenticated.get(
+    "/virtual-api-key/:virtualApiKeyId",
+    verifyVirtualApiKeyAccess,
+    verifyUserHasAction(ActionsEnum.getVirtualApiKey),
+    virtualApiKey.getVirtualApiKey
+);
+
+authenticated.post(
+    "/virtual-api-key/:virtualApiKeyId",
+    verifyVirtualApiKeyAccess,
+    verifyUserHasAction(ActionsEnum.updateVirtualApiKey),
+    logActionAudit(ActionsEnum.updateVirtualApiKey),
+    virtualApiKey.updateVirtualApiKey
+);
+
+authenticated.delete(
+    "/virtual-api-key/:virtualApiKeyId",
+    verifyVirtualApiKeyAccess,
+    verifyUserHasAction(ActionsEnum.deleteVirtualApiKey),
+    logActionAudit(ActionsEnum.deleteVirtualApiKey),
+    virtualApiKey.deleteVirtualApiKey
+);
+
+authenticated.get(
+    "/ai-provider/:providerId/ai-budgets",
+    verifyAiProviderAccess,
+    verifyUserHasAction(ActionsEnum.listAiBudgets),
+    aiBudget.listAiBudgetsForProvider
+);
+
+authenticated.get(
+    "/ai-model/:modelId/ai-budgets",
+    verifyAiModelAccess,
+    verifyUserHasAction(ActionsEnum.listAiBudgets),
+    aiBudget.listAiBudgetsForModel
+);
+
+authenticated.get(
+    "/resource/:resourceId/ai-budgets",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.listAiBudgets),
+    aiBudget.listAiBudgetsForResource
+);
+
+authenticated.get(
+    "/site-resource/:siteResourceId/ai-budgets",
+    verifySiteResourceAccess,
+    verifyUserHasAction(ActionsEnum.listAiBudgets),
+    aiBudget.listAiBudgetsForSiteResource
+);
+
+authenticated.get(
+    "/role/:roleId/ai-budgets",
+    verifyRoleAccess,
+    verifyUserHasAction(ActionsEnum.listAiBudgets),
+    aiBudget.listAiBudgetsForRole
+);
+
+authenticated.get(
+    "/virtual-api-key/:virtualApiKeyId/ai-budgets",
+    verifyVirtualApiKeyAccess,
+    verifyUserHasAction(ActionsEnum.listAiBudgets),
+    aiBudget.listAiBudgetsForVirtualApiKey
+);
+
+authenticated.get(
+    "/org/:orgId/labels",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.listOrgLabels),
+    labels.listOrgLabels
+);
+
+authenticated.post(
+    "/org/:orgId/labels",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.createOrgLabel),
+    labels.createOrgLabel
+);
+
+authenticated.patch(
+    "/org/:orgId/label/:labelId",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.updateOrgLabel),
+    labels.updateOrgLabel
+);
+
+authenticated.delete(
+    "/org/:orgId/label/:labelId",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.deleteOrgLabel),
+    labels.deleteOrgLabel
+);
+
+authenticated.put(
+    "/org/:orgId/label/:labelId/attach",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.attachLabelToItem),
+    labels.attachLabelToItem
+);
+
+authenticated.put(
+    "/org/:orgId/label/:labelId/detach",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.detachLabelFromItem),
+    labels.detachLabelFromItem
+);
+
+authenticated.post(
+    "/org/:orgId/ssh/sign-key",
+    verifyOrgAccess,
+    verifyLimits,
+    // verifyUserHasAction(ActionsEnum.signSshKey), // this check happens inside of the function now
+    // logActionAudit(ActionsEnum.signSshKey), // it is handled inside of the function below so we can include more metadata
+    ssh.signSshKey
+);
+
+authenticated.get(
+    "/client/:clientId/verify-associations-cache",
+    verifyClientAccess,
+    client.verifyClientAssociationsCache
+);
+
+authenticated.post(
+    "/client/:clientId/rebuild-associations-cache",
+    verifyClientAccess,
+    client.rebuildClientAssociationsCacheRoute
+);
+
+authenticated.get(
+    "/org/:orgId/certificate/:domainId/:domain",
+    verifyOrgAccess,
+    verifyCertificateAccess,
+    verifyUserHasAction(ActionsEnum.getCertificate),
+    certificates.getCertificate
+);
+
+authenticated.get(
+    "/org/:orgId/batched-certificates",
+    verifyOrgAccess,
+    verifyUserHasAction(ActionsEnum.getCertificate),
+    certificates.getBatchedCertificates
+);
+
+authenticated.post(
+    "/org/:orgId/certificate/:certId/restart",
+    verifyOrgAccess,
+    verifyCertificateAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.restartCertificate),
+    logActionAudit(ActionsEnum.restartCertificate),
+    certificates.restartCertificate
+);
+
+authenticated.post(
+    "/re-key/:clientId/regenerate-client-secret",
+    verifyClientAccess, // this is first to set the org id
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.reGenerateSecret),
+    reKey.reGenerateClientSecret
+);
+
+authenticated.post(
+    "/re-key/:siteId/regenerate-site-secret",
+    verifySiteAccess, // this is first to set the org id
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.reGenerateSecret),
+    reKey.reGenerateSiteSecret
+);
+
+authenticated.put(
+    "/re-key/:orgId/regenerate-remote-exit-node-secret",
+    verifyOrgAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.reGenerateSecret),
+    reKey.reGenerateExitNodeSecret
+);
+
+authenticated.put(
+    "/resource/:resourceId/mtls/certificate",
+    verifyResourceAccess,
+    verifyLimits,
+    verifyUserHasAction(ActionsEnum.createResourceMtlsCertificate),
+    logActionAudit(ActionsEnum.createResourceMtlsCertificate),
+    resource.createResourceMtlsCertificate
+);
+authenticated.get(
+    "/resource/:resourceId/mtls/certificates",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.listResourceMtlsCertificates),
+    resource.listResourceMtlsCertificates
+);
+authenticated.delete(
+    "/resource/:resourceId/mtls/certificate/:mtlsCertificateId",
+    verifyResourceAccess,
+    verifyUserHasAction(ActionsEnum.deleteResourceMtlsCertificate),
+    logActionAudit(ActionsEnum.deleteResourceMtlsCertificate),
+    resource.deleteResourceMtlsCertificate
+);
+
+// Auth routes
+export const authRouter = Router();
+unauthenticated.use("/auth", authRouter);
+
+// Register setup-check BEFORE the global auth rate limiter.
+// This endpoint is called on every dashboard root page load (pure boolean
+// read, no secrets) and must not consume the auth rate-limit budget.
+authRouter.get("/initial-setup-complete", auth.initialSetupComplete);
+
+authRouter.use(
+    rateLimit({
+        windowMs:
+            config.getRawConfig().rate_limits.auth.window_minutes * 60 * 1000,
+        max: config.getRawConfig().rate_limits.auth.max_requests,
+        keyGenerator: (req) =>
+            `authRouterGlobal:${ipKeyGenerator(req.ip || "")}:${req.path}`,
+        handler: (req, res, next) => {
+            const message = `Rate limit exceeded. You can make ${config.getRawConfig().rate_limits.auth.max_requests} requests every ${config.getRawConfig().rate_limits.auth.window_minutes} minute(s).`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    })
+);
+
+authRouter.put(
+    "/signup",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `signup:${ipKeyGenerator(req.ip || "")}:${rateLimitIdentityKey(req.body.email)}`,
+        handler: (req, res, next) => {
+            const message = `You can only sign up ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.signup
+);
+authRouter.post(
+    "/login",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `login:${rateLimitIdentityKey(req.body.email) || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only log in ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.login
+);
+authRouter.post("/logout", auth.logout);
+authRouter.post("/delete-my-account", auth.deleteMyAccount);
+authRouter.post(
+    "/lookup-user",
+    // The limiter below is keyed on the identifier, so on its own one caller
+    // could try any number of different identifiers. Cap each IP as well.
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 200,
+        keyGenerator: (req) => `lookupUserIp:${ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `Too many user lookups from this IP. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `lookupUser:${rateLimitIdentityKey(req.body.identifier) || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only lookup users ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.lookupUser
+);
+authRouter.post(
+    "/newt/get-token",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 900,
+        keyGenerator: (req) =>
+            `newtGetToken:${req.body.newtId || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only request a Newt token ${900} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    newt.getNewtToken
+);
+
+authRouter.post(
+    "/newt/version",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 60,
+        keyGenerator: (req) =>
+            `newtVersion:${req.body.newtId || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only check the Newt version ${60} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    newt.getNewtVersion
+);
+
+authRouter.post(
+    "/newt/register",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 30,
+        keyGenerator: (req) =>
+            `newtRegister:${req.body.provisioningKey?.split(".")[0] || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only register a newt ${30} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    newt.registerNewt
+);
+authRouter.post(
+    "/olm/get-token",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 900,
+        keyGenerator: (req) =>
+            `olmGetToken:${req.body.olmId || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only request an Olm token ${900} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    olm.getOlmToken
+);
+authRouter.post(
+    "/olm/client-settings",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 300,
+        keyGenerator: (req) =>
+            `olmClientSettings:${req.body.olmId || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only request Olm client settings ${300} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    olm.getOlmClientSettings
+);
+
+authRouter.post(
+    "/2fa/enable",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) => {
+            return `signup:${rateLimitIdentityKey(req.body.email) || req.user?.userId || ipKeyGenerator(req.ip || "")}`;
+        },
+        handler: (req, res, next) => {
+            const message = `You can only enable 2FA ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.verifyTotp
+);
+authRouter.post(
+    "/2fa/request",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) => {
+            return `signup:${rateLimitIdentityKey(req.body.email) || req.user?.userId || ipKeyGenerator(req.ip || "")}`;
+        },
+        handler: (req, res, next) => {
+            const message = `You can only request a 2FA code ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.requestTotpSecret
+);
+authRouter.post(
+    "/2fa/disable",
+    verifySessionUserMiddleware,
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `signup:${req.user?.userId || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only disable 2FA ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.disable2fa
+);
+authRouter.post(
+    "/verify-email",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `signup:${rateLimitIdentityKey(req.body.email) || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only sign up ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    verifySessionMiddleware,
+    auth.verifyEmail
+);
+
+authRouter.post(
+    "/verify-email/request",
+    verifySessionMiddleware,
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `requestEmailVerificationCode:${rateLimitIdentityKey(req.user?.email) || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only request an email verification code ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.requestEmailVerificationCode
+);
+
+authRouter.post(
+    "/change-password",
+    verifySessionUserMiddleware,
+    auth.changePassword
+);
+
+authRouter.post(
+    "/reset-password/request",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `requestPasswordReset:${rateLimitIdentityKey(req.body.email) || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only request a password reset ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.requestPasswordReset
+);
+
+authRouter.post(
+    "/reset-password/",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `resetPassword:${rateLimitIdentityKey(req.body.email) || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only request a password reset ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.resetPassword
+);
+
+authRouter.post(
+    "/resource/:resourceId/password",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `authWithPassword:${ipKeyGenerator(req.ip || "")}:${req.params.resourceId || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only authenticate with password ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    resource.authWithPassword
+);
+authRouter.post(
+    "/resource/:resourceId/pincode",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `authWithPincode:${ipKeyGenerator(req.ip || "")}:${req.params.resourceId || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only authenticate with pincode ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    resource.authWithPincode
+);
+
+authRouter.post(
+    "/resource/:resourceId/whitelist",
+    rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 15,
+        keyGenerator: (req) =>
+            `authWithWhitelist:${ipKeyGenerator(req.ip || "")}:${rateLimitIdentityKey(req.body.email)}:${req.params.resourceId}`,
+        handler: (req, res, next) => {
+            const message = `You can only request an email OTP ${15} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    resource.authWithWhitelist
+);
+
+authRouter.post(
+    "/resource/:resourceId/access-token",
+    resource.authWithAccessToken
+);
+
+authRouter.post("/access-token", resource.authWithAccessToken);
+
+authRouter.post("/idp/:idpId/oidc/generate-url", idp.generateOidcUrl);
+
+authRouter.post("/idp/:idpId/oidc/validate-callback", idp.validateOidcCallback);
+
+authRouter.put("/set-server-admin", auth.setServerAdmin);
+authRouter.post("/validate-setup-token", auth.validateSetupToken);
+
+// Security Key routes
+authRouter.post(
+    "/security-key/register/start",
+    verifySessionUserMiddleware,
+    rateLimit({
+        windowMs: 15 * 60 * 1000, // 15 minutes
+        max: 5, // Allow 5 security key registrations per 15 minutes
+        keyGenerator: (req) =>
+            `securityKeyRegister:${req.user?.userId || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only register a security key ${5} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.startRegistration
+);
+authRouter.post(
+    "/security-key/register/verify",
+    verifySessionUserMiddleware,
+    auth.verifyRegistration
+);
+authRouter.post(
+    "/security-key/authenticate/start",
+    rateLimit({
+        windowMs: 15 * 60 * 1000, // 15 minutes
+        max: 10, // Allow 10 authentication attempts per 15 minutes per IP
+        keyGenerator: (req) => {
+            return `securityKeyAuth:${rateLimitIdentityKey(req.body.email) || ipKeyGenerator(req.ip || "")}`;
+        },
+        handler: (req, res, next) => {
+            const message = `You can only attempt security key authentication ${10} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.startAuthentication
+);
+authRouter.post("/security-key/authenticate/verify", auth.verifyAuthentication);
+authRouter.get(
+    "/security-key/list",
+    verifySessionUserMiddleware,
+    auth.listSecurityKeys
+);
+authRouter.delete(
+    "/security-key/:credentialId",
+    verifySessionUserMiddleware,
+    rateLimit({
+        windowMs: 15 * 60 * 1000, // 15 minutes
+        max: 20, // Allow 10 authentication attempts per 15 minutes per IP
+        keyGenerator: (req) =>
+            `securityKeyAuth:${req.user?.userId || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only delete a security key ${10} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.deleteSecurityKey
+);
+
+authRouter.post(
+    "/device-web-auth/start",
+    rateLimit({
+        windowMs: 15 * 60 * 1000, // 15 minutes
+        max: 30, // Allow 30 device auth code requests per 15 minutes per IP
+        keyGenerator: (req) =>
+            `deviceWebAuthStart:${ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only request a device auth code ${30} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.startDeviceWebAuth
+);
+
+authRouter.get(
+    "/device-web-auth/poll/:code",
+    rateLimit({
+        windowMs: 60 * 1000, // 1 minute
+        max: 60, // Allow 60 polling requests per minute per IP (poll every second)
+        keyGenerator: (req) =>
+            `deviceWebAuthPoll:${ipKeyGenerator(req.ip || "")}:${req.params.code}`,
+        handler: (req, res, next) => {
+            const message = `You can only poll a device auth code ${60} times per minute. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.pollDeviceWebAuth
+);
+
+authenticated.post(
+    "/device-web-auth/verify",
+    rateLimit({
+        windowMs: 15 * 60 * 1000, // 15 minutes
+        max: 50, // Allow 50 verification attempts per 15 minutes per user
+        keyGenerator: (req) =>
+            `deviceWebAuthVerify:${req.user?.userId || ipKeyGenerator(req.ip || "")}`,
+        handler: (req, res, next) => {
+            const message = `You can only verify a device auth code ${50} times every ${15} minutes. Please try again later.`;
+            return next(createHttpError(HttpCode.TOO_MANY_REQUESTS, message));
+        },
+        store: createStore()
+    }),
+    auth.verifyDeviceWebAuth
+);
