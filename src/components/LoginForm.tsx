@@ -45,6 +45,11 @@ type LoginFormProps = {
     orgId?: string;
     forceLogin?: boolean;
     defaultEmail?: string;
+    // StevensIT: show the identity providers as the primary choice and keep
+    // local accounts behind a link.
+    ssoFirst?: boolean;
+    initialShowLocal?: boolean;
+    onShowLocalChange?: (showLocal: boolean) => void;
 };
 
 export default function LoginForm({
@@ -53,7 +58,10 @@ export default function LoginForm({
     idps,
     orgId,
     forceLogin,
-    defaultEmail
+    defaultEmail,
+    ssoFirst,
+    initialShowLocal,
+    onShowLocalChange
 }: LoginFormProps) {
     const router = useRouter();
 
@@ -65,6 +73,14 @@ export default function LoginForm({
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const hasIdp = idps && idps.length > 0;
+    const chooserMode = !!ssoFirst && !!hasIdp;
+    const [showLocal, setShowLocalState] = useState(
+        !chooserMode || !!initialShowLocal
+    );
+    function setShowLocal(value: boolean) {
+        setShowLocalState(value);
+        onShowLocalChange?.(value);
+    }
 
     const [mfaRequested, setMfaRequested] = useState(false);
 
@@ -261,6 +277,46 @@ export default function LoginForm({
         }
     }
 
+    if (chooserMode && !showLocal) {
+        return (
+            <div className="space-y-3">
+                {idps!.map((idp) => (
+                    <Button
+                        key={idp.idpId}
+                        type="button"
+                        variant="outline"
+                        size="lg"
+                        className="w-full h-12 text-base"
+                        onClick={() => {
+                            loginWithIdp(idp.idpId);
+                        }}
+                    >
+                        {idp.name}
+                    </Button>
+                ))}
+
+                {error && (
+                    <Alert variant="destructive">
+                        <AlertDescription>{error}</AlertDescription>
+                    </Alert>
+                )}
+
+                <div className="pt-3 text-center">
+                    <button
+                        type="button"
+                        className="text-sm text-muted-foreground underline-offset-4 hover:underline"
+                        onClick={() => {
+                            setError(null);
+                            setShowLocal(true);
+                        }}
+                    >
+                        Administrator sign-in
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="space-y-4">
             {!mfaRequested && (
@@ -361,7 +417,22 @@ export default function LoginForm({
                             disabled={loading}
                         />
 
-                        {hasIdp && (
+                        {chooserMode && (
+                            <div className="pt-2 text-center">
+                                <button
+                                    type="button"
+                                    className="text-sm text-muted-foreground underline-offset-4 hover:underline"
+                                    onClick={() => {
+                                        setError(null);
+                                        setShowLocal(false);
+                                    }}
+                                >
+                                    Back to single sign-on
+                                </button>
+                            </div>
+                        )}
+
+                        {hasIdp && !chooserMode && (
                             <>
                                 <div className="relative">
                                     <div className="absolute inset-0 flex items-center">

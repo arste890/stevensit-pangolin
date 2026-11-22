@@ -11,7 +11,7 @@ import { createApiClient } from "@app/lib/api";
 import LoginForm, { LoginFormIDP } from "@app/components/LoginForm";
 import { useEnvContext } from "@app/hooks/useEnvContext";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Image from "next/image";
 import { cleanRedirect } from "@app/lib/cleanRedirect";
 import BrandingLogo from "@app/components/BrandingLogo";
@@ -44,6 +44,9 @@ export default function DashboardLoginForm({
     const { env } = useEnvContext();
     const t = useTranslations();
     const { isUnlocked } = useLicenseStatusContext();
+    const initialShowLocal =
+        searchParams?.local === "1" || !!defaultUser || !!forceLogin;
+    const [showLocal, setShowLocal] = useState(initialShowLocal);
 
     function getSubtitle() {
         if (forceLogin) {
@@ -51,6 +54,9 @@ export default function DashboardLoginForm({
         }
         if (isUnlocked() && env.branding?.loginPage?.subtitleText) {
             return env.branding.loginPage.subtitleText;
+        }
+        if (idps && idps.length > 0 && !showLocal) {
+            return "Choose how to sign in";
         }
         return t("loginStart");
     }
@@ -78,6 +84,9 @@ export default function DashboardLoginForm({
                     idps={idps}
                     forceLogin={forceLogin}
                     defaultEmail={defaultUser}
+                    ssoFirst
+                    initialShowLocal={initialShowLocal}
+                    onShowLocalChange={setShowLocal}
                     onLogin={(redirectUrl) => {
                         if (redirectUrl) {
                             const safe = cleanRedirect(redirectUrl);

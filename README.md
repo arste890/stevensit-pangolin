@@ -1,4 +1,4 @@
-> **StevensIT Access fork.** This repository is a rebranded build of Pangolin for StevensIT. See [STEVENSIT.md](STEVENSIT.md) for what changed and what is excluded. The upstream project is https://github.com/fosrl/pangolin.
+> **StevensIT Access.** This repository is the complete corresponding source of StevensIT Access, the sign-in and access service at access.stevensit.org. It is a modified version of [Pangolin](https://github.com/fosrl/pangolin), copyright Fossorial, Inc., and is licensed under the [GNU Affero General Public License, version 3](LICENSE). It is provided without any warranty, to the extent permitted by law; see sections 15 and 16 of the license. [STEVENSIT.md](STEVENSIT.md) lists what was changed and which upstream files are excluded.
 
 <div align="center">
     <h2>

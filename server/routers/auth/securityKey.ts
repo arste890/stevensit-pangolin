@@ -40,7 +40,7 @@ const rpID = (() => {
     return url.hostname;
 })();
 
-const rpName = "Pangolin";
+const rpName = "StevensIT Access";
 const origin = config.getRawConfig().app.dashboard_url || "localhost";
 
 // Database-based challenge storage (replaces in-memory storage)

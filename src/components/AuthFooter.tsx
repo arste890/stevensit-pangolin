@@ -42,39 +42,13 @@ export default async function AuthFooter() {
                 </span>
                 <Separator orientation="vertical" />
                 <a
-                    href="https://github.com/fosrl/pangolin"
+                    href="https://github.com/arste890/stevensit-pangolin#readme"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="whitespace-nowrap"
                 >
-                    Based on Pangolin © Fossorial, Inc.
+                    License and source
                 </a>
-                <Separator orientation="vertical" />
-                <a
-                    href="https://www.gnu.org/licenses/agpl-3.0.html"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="whitespace-nowrap"
-                >
-                    AGPL-3.0, no warranty
-                </a>
-                <Separator orientation="vertical" />
-                <a
-                    href="https://github.com/arste890/stevensit-pangolin"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="whitespace-nowrap"
-                >
-                    Source code
-                </a>
-                <Separator orientation="vertical" />
-                <span>
-                    {build === "oss"
-                        ? t("communityEdition")
-                        : build === "enterprise"
-                          ? t("enterpriseEdition")
-                          : t("pangolinCloud")}
-                </span>
                 {build === "enterprise" &&
                 licenseStatus?.isHostLicensed &&
                 licenseStatus?.isLicenseValid &&

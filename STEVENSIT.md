@@ -18,7 +18,10 @@ All changes are to AGPL-3.0 files:
 | `public/logo/pangolin_orange.svg` | StevensIT shield, shown on the initial setup page |
 | `public/favicon.ico` | StevensIT favicon |
 | `src/app/layout.tsx`, `src/app/auth/layout.tsx`, `src/app/setup/layout.tsx`, `src/app/admin/layout.tsx` | Default product name "StevensIT Access" in page titles |
-| `src/components/AuthFooter.tsx` | StevensIT notice, credit to Pangolin and Fossorial, AGPL-3.0 notice, link to this source |
+| `src/components/AuthFooter.tsx` | StevensIT notice and one "License and source" link to this repository, whose README carries the Pangolin credit, the AGPL-3.0 notice and the warranty disclaimer |
+| `src/components/LoginForm.tsx`, `src/components/DashboardLoginForm.tsx` | Dashboard sign-in shows the configured identity providers as the choice; local accounts are behind an "Administrator sign-in" link (or `/auth/login?local=1`) |
+| `server/routers/auth/securityKey.ts` | Security key prompts name "StevensIT Access" |
+| `README.md` | Notice that this repository is the corresponding source, with credit, licence and warranty statements |
 | `src/components/PoweredByPangolin.tsx` | Resource sign-in shows "StevensIT Access" |
 | `src/app/globals.css` | StevensIT navy (#243a85 light, #6c83d8 dark) in place of Pangolin orange |
 | `messages/en-US.json` | Four user-facing strings name StevensIT Access |
