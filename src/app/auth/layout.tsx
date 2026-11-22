@@ -5,8 +5,8 @@ import { Metadata } from "next";
 
 export const metadata: Metadata = {
     title: {
-        template: `%s - ${process.env.BRANDING_APP_NAME || "Pangolin"}`,
-        default: `Auth - ${process.env.BRANDING_APP_NAME || "Pangolin"}`
+        template: `%s - ${process.env.BRANDING_APP_NAME || "StevensIT Access"}`,
+        default: `Auth - ${process.env.BRANDING_APP_NAME || "StevensIT Access"}`
     },
     description: ""
 };

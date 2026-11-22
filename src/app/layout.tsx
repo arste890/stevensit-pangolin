@@ -26,7 +26,7 @@ import StoreInternalRedirect from "@app/components/StoreInternalRedirect";
 import localFont from "next/font/local";
 
 export const metadata: Metadata = {
-    title: `Dashboard - ${process.env.BRANDING_APP_NAME || "Pangolin"}`,
+    title: `Dashboard - ${process.env.BRANDING_APP_NAME || "StevensIT Access"}`,
     description: ""
 };
 

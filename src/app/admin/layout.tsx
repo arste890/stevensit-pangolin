@@ -18,7 +18,7 @@ import { build } from "@server/build";
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-    title: `Server Admin - Pangolin`,
+    title: `Server Admin - ${process.env.BRANDING_APP_NAME || "StevensIT Access"}`,
     description: ""
 };
 

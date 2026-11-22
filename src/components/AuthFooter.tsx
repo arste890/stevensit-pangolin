@@ -37,31 +37,36 @@ export default async function AuthFooter() {
     return (
         <footer className="hidden md:block w-full mt-12 py-3 mb-6 px-4">
             <div className="container mx-auto flex flex-wrap justify-center items-center h-3 space-x-4 text-xs text-neutral-400 dark:text-neutral-600">
+                <span className="whitespace-nowrap">
+                    © {new Date().getFullYear()} StevensIT
+                </span>
+                <Separator orientation="vertical" />
                 <a
-                    href="https://pangolin.net"
+                    href="https://github.com/fosrl/pangolin"
                     target="_blank"
                     rel="noopener noreferrer"
-                    aria-label="Built by Fossorial"
-                    className="flex items-center space-x-2 whitespace-nowrap"
+                    className="whitespace-nowrap"
                 >
-                    <span>© {new Date().getFullYear()} Fossorial, Inc.</span>
+                    Based on Pangolin © Fossorial, Inc.
                 </a>
-                {build !== "saas" && (
-                    <>
-                        <Separator orientation="vertical" />
-                        <a
-                            href="https://pangolin.net"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            aria-label="Built by Fossorial"
-                            className="flex items-center space-x-2 whitespace-nowrap"
-                        >
-                            <span>
-                                {process.env.BRANDING_APP_NAME || "Pangolin"}
-                            </span>
-                        </a>
-                    </>
-                )}
+                <Separator orientation="vertical" />
+                <a
+                    href="https://www.gnu.org/licenses/agpl-3.0.html"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="whitespace-nowrap"
+                >
+                    AGPL-3.0, no warranty
+                </a>
+                <Separator orientation="vertical" />
+                <a
+                    href="https://github.com/arste890/stevensit-pangolin"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="whitespace-nowrap"
+                >
+                    Source code
+                </a>
                 <Separator orientation="vertical" />
                 <span>
                     {build === "oss"

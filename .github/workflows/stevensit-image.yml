@@ -1,0 +1,44 @@
+# Builds the StevensIT Access image (Pangolin OSS build) for linux/arm64 and publishes it to GHCR.
+name: StevensIT Access image
+
+on:
+  push:
+    tags: ["*-sit*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tag
+        id: tag
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          build-args: |
+            BUILD=oss
+            DATABASE=sqlite
+            VERSION=${{ steps.tag.outputs.tag }}
+            REVISION=${{ github.sha }}
+            IMAGE_TITLE=StevensIT Access
+            IMAGE_DESCRIPTION=StevensIT Access, a rebranded build of Pangolin (AGPL-3.0)
+          tags: ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=AGPL-3.0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

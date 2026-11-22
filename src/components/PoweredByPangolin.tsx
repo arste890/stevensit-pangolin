@@ -49,5 +49,5 @@ export default function PoweredByPangolin() {
         );
     }
 
-    return <PoweredByLabel brandName="Pangolin" />;
+    return <PoweredByLabel brandName="StevensIT Access" />;
 }
