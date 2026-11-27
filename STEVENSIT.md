@@ -17,6 +17,7 @@ All changes are to AGPL-3.0 files:
 | `public/logo/word_mark_black.png`, `public/logo/word_mark_white.png` | StevensIT Access word marks (StevensIT shield, Plus Jakarta Sans) |
 | `public/logo/pangolin_orange.svg` | StevensIT shield, shown on the initial setup page |
 | `public/favicon.ico` | StevensIT favicon |
+| `branding/` | Sources for the word marks (SVG layout, shield image, Plus Jakarta Sans under the OFL, render script) |
 | `src/app/layout.tsx`, `src/app/auth/layout.tsx`, `src/app/setup/layout.tsx`, `src/app/admin/layout.tsx` | Default product name "StevensIT Access" in page titles |
 | `src/components/AuthFooter.tsx` | StevensIT notice and one "License and source" link to this repository, whose README carries the Pangolin credit, the AGPL-3.0 notice and the warranty disclaimer |
 | `src/components/LoginForm.tsx`, `src/components/DashboardLoginForm.tsx` | Dashboard sign-in shows the configured identity providers as the choice; local accounts are behind an "Administrator sign-in" link (or `/auth/login?local=1`) |
